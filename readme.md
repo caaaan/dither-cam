@@ -32,8 +32,11 @@ A simple desktop application built with Python and Tkinter/Pillow to apply dithe
 To create a standalone executable (.exe on Windows, .app on macOS) that can be run without installing Python or dependencies, you can use the included `build_app.py` script.
 
 1.  **Prerequisites:**
-    *   Install PyInstaller: `pip install pyinstaller`
-    *   Create icon files named `ditherer.ico` (for Windows) and `ditherer.icns` (for macOS) from an image and place them in the same directory as the script.
+    *   Install PyInstaller:
+    ```bash
+    pip install pyinstaller
+    ```
+    *   **Note:** This guide assumes you have Python installed on your system. If you don't have Python installed, please visit [python.org](https://python.org) to download and install the latest version for your operating system.
 2.  **Run the build script:**
     ```bash
     python build.py
