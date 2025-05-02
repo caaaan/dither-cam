@@ -3,7 +3,7 @@
 <div align="center">
   <p style="font-size: 2em; font-weight: bold; margin-bottom: 4; font-family: 'Courier New', monospace;">Dither3000</p>
  
-<img src="ditherer.jpeg" alt="logo" width="100"/>
+<img src="ditherer.jpeg" alt="logo" width="100" style="margin-bottom: 4; "/>
 </div>
 
 A simple desktop application built with Python and Tkinter/Pillow to apply dithering algorithms to images interactively, with controls for threshold, contrast, and pixel scale.
