@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, ttk
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageEnhance, ImageStat, ImageFilter
 import numpy as np
 import subprocess
 import os
@@ -9,9 +9,11 @@ class DitherApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Image Ditherer")
-        self.root.geometry("800x600")
+        self.root.geometry("1200x800")
         self.original_image = None
         self.dithered_image = None
+        # Auto-render state
+        self.auto_render_var = tk.BooleanVar(value=True)
 
         # --- Layout ---
         self.root.grid_rowconfigure(1, weight=1)
@@ -19,48 +21,42 @@ class DitherApp:
 
         top_frame = tk.Frame(root)
         top_frame.grid(row=0, column=0, sticky='ew', padx=10, pady=5)
-        top_frame.grid_columnconfigure(7, weight=1)
+        top_frame.grid_columnconfigure(1, weight=1)
+        top_frame.grid_columnconfigure(3, weight=1)
+        top_frame.grid_columnconfigure(8, weight=1)
 
         btn_open = tk.Button(
             top_frame, text="Open Image", command=self.open_image,
             bg='lightgray', activebackground='blue', activeforeground='white'
         )
-        btn_open.grid(row=0, column=0, padx=5)
+        btn_open.grid(row=0, column=0, padx=5, pady=2)
 
         btn_save = tk.Button(
-            top_frame, text="Save Dithered Image", command=self.save_image,
+            top_frame, text="Save Image", command=self.save_image,
             state=tk.DISABLED, bg='lightgray', activebackground='blue', activeforeground='white'
         )
-        btn_save.grid(row=0, column=1, padx=5)
+        btn_save.grid(row=0, column=1, padx=5, pady=2, sticky='w')
         self.save_button = btn_save
 
         lbl_algo = tk.Label(top_frame, text="Algorithm:")
-        lbl_algo.grid(row=0, column=2, padx=(10,5))
+        lbl_algo.grid(row=0, column=2, padx=(10,5), pady=2, sticky='e')
         self.algorithm_var = tk.StringVar()
         self.algo_combobox = ttk.Combobox(
             top_frame, textvariable=self.algorithm_var,
-            values=["Floyd-Steinberg", "Simple Threshold"], state='readonly'
+            values=["Floyd-Steinberg", "Simple Threshold"], state='readonly', width=15
         )
         self.algo_combobox.current(0)
-        self.algo_combobox.grid(row=0, column=3, padx=5)
-
-        lbl_threshold = tk.Label(top_frame, text="Threshold:")
-        lbl_threshold.grid(row=0, column=4, padx=(10,5))
-        self.threshold_slider = ttk.Scale(
-            top_frame, from_=1, to=254, orient=tk.HORIZONTAL,
-            command=self.update_threshold_label
-        )
-        self.threshold_slider.set(128)
-        self.threshold_slider.grid(row=0, column=5, padx=5)
-
-        self.lbl_thr_val = tk.Label(top_frame, text="128")
-        self.lbl_thr_val.grid(row=0, column=6, padx=(0,10))
+        self.algo_combobox.grid(row=0, column=3, padx=5, pady=2, sticky='w')
 
         btn_apply = tk.Button(
             top_frame, text="Apply Dither", command=self.apply_dither,
             bg='lightgray', activebackground='blue', activeforeground='white'
         )
-        btn_apply.grid(row=0, column=7, padx=5)
+        btn_apply.grid(row=0, column=7, padx=5, pady=2, sticky='e')
+
+        # Add Auto-Render Checkbutton
+        auto_render_check = ttk.Checkbutton(top_frame, text="Auto-Render", variable=self.auto_render_var)
+        auto_render_check.grid(row=0, column=8, padx=5, pady=2, sticky='e')
 
         image_frame = tk.Frame(root)
         image_frame.grid(row=1, column=0, sticky='nsew', padx=10, pady=5)
@@ -84,6 +80,34 @@ class DitherApp:
         self.lbl_dithered = tk.Label(frame_dith)
         self.lbl_dithered.grid(sticky='nsew')
 
+        # --- Row 1 Controls ---
+        lbl_threshold = tk.Label(top_frame, text="Threshold:")
+        lbl_threshold.grid(row=1, column=0, padx=5, pady=2, sticky='w')
+        self.threshold_slider = ttk.Scale(top_frame, from_=1, to=254, orient=tk.HORIZONTAL, length=150, command=self.update_threshold_and_apply)
+        self.threshold_slider.set(128)
+        self.threshold_slider.grid(row=1, column=1, padx=2, pady=2, sticky='ew')
+        self.lbl_thr_val = tk.Label(top_frame, text="128")
+        self.lbl_thr_val.grid(row=1, column=2, padx=(0,10), pady=2, sticky='w')
+
+        lbl_contrast = tk.Label(top_frame, text="Contrast:")
+        lbl_contrast.grid(row=1, column=3, padx=(10,5), pady=2, sticky='w')
+        self.contrast_var = tk.DoubleVar(value=1.0)
+        self.contrast_slider = ttk.Scale(top_frame, from_=0.1, to=5.0, orient=tk.HORIZONTAL, length=150, variable=self.contrast_var, command=self.update_contrast_and_apply)
+        self.contrast_slider.grid(row=1, column=4, padx=2, pady=2, sticky='ew')
+        self.lbl_con_val = tk.Label(top_frame, text="1.0")
+        self.lbl_con_val.grid(row=1, column=5, padx=(0,10), pady=2, sticky='w')
+
+        lbl_scale = tk.Label(top_frame, text="Pixel Scale:")
+        lbl_scale.grid(row=1, column=6, padx=(10,5), pady=2, sticky='w')
+        self.scale_var = tk.IntVar(value=1)
+        self.scale_slider = ttk.Scale(top_frame, from_=1, to=8, orient=tk.HORIZONTAL, length=100, variable=self.scale_var, command=self.update_scale_and_apply)
+        self.scale_slider.grid(row=1, column=7, padx=2, pady=2, sticky='ew')
+        self.lbl_sca_val = tk.Label(top_frame, text="1")
+        self.lbl_sca_val.grid(row=1, column=8, padx=(0,10), pady=2, sticky='w')
+
+        # Bind Combobox selection to apply dither
+        self.algo_combobox.bind("<<ComboboxSelected>>", self.apply_dither_event_wrapper)
+
         self.lbl_original.bind(
             '<Configure>', lambda e: self.update_image_display(
                 self.lbl_original, self.original_image))
@@ -91,34 +115,112 @@ class DitherApp:
             '<Configure>', lambda e: self.update_image_display(
                 self.lbl_dithered, self.dithered_image))
 
+    def update_threshold_and_apply(self, value):
+        self.update_threshold_label(value)
+        if self.auto_render_var.get():
+            self.apply_dither()
+
+    def update_contrast_and_apply(self, value):
+        self.update_contrast_label(value)
+        if self.auto_render_var.get():
+            self.apply_dither()
+
+    def update_scale_and_apply(self, value):
+        self.update_scale_label(value)
+        if self.auto_render_var.get():
+            self.apply_dither()
+
+    def apply_dither_event_wrapper(self, event=None):
+        if self.auto_render_var.get():
+            self.root.after(10, self.apply_dither)
+
     def update_threshold_label(self, value):
         val = int(float(value))
         self.lbl_thr_val.config(text=str(val))
 
-    def floyd_steinberg_numpy(self, pil_img, threshold=128):
-        img = pil_img.convert('L')
-        arr = np.array(img, dtype=np.float32)
-        h, w = arr.shape
-        for y in range(h):
-            for x in range(w):
-                old = arr[y, x]
-                new = 0 if old < threshold else 255
-                err = old - new
-                arr[y, x] = new
-                if x+1 < w:
-                    arr[y, x+1] += err * 7/16
-                if y+1 < h:
-                    if x > 0:
-                        arr[y+1, x-1] += err * 3/16
-                    arr[y+1, x] += err * 5/16
-                    if x+1 < w:
-                        arr[y+1, x+1] += err * 1/16
-        arr = np.clip(arr, 0, 255).astype(np.uint8)
-        return Image.fromarray(arr)
+    def update_contrast_label(self, value):
+        val = f"{float(value):.1f}"
+        self.lbl_con_val.config(text=val)
 
-    def simple_threshold(self, pil_img, threshold=128):
-        img = pil_img.convert('L')
-        return img.point(lambda p: 0 if p < threshold else 255)
+    def update_scale_label(self, value):
+        val = int(float(value))
+        self.scale_var.set(val)
+        self.lbl_sca_val.config(text=str(val))
+
+    def floyd_steinberg_numpy(self, pil_img, threshold=128, pixel_scale=1):
+        if pixel_scale <= 0:
+            pixel_scale = 1
+
+        if pixel_scale == 1:
+            type = 'F'
+            img = pil_img.convert(type)
+            arr = np.array(img, dtype=np.float32)
+            if(type == 'RGB'):
+                h, w, c = arr.shape
+            elif(type == 'F'):
+                h, w = arr.shape
+            for y in range(h):
+                for x in range(w):
+                    old = arr[y, x].copy()
+                    new = np.where(old < threshold, 0, 255)
+                    err = old - new
+                    arr[y, x] = new
+                    if x+1 < w:
+                        arr[y, x+1] += err * 7/16
+                    if y+1 < h:
+                        if x > 0: arr[y+1, x-1] += err * 3/16
+                        arr[y+1, x] += err * 5/16
+                        if x+1 < w: arr[y+1, x+1] += err * 1/16
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+            return Image.fromarray(arr)
+        else:
+            orig_w, orig_h = pil_img.size
+            small_w = max(1, orig_w // pixel_scale)
+            small_h = max(1, orig_h // pixel_scale)
+
+            print(f"Downscaling to {small_w}x{small_h}")
+            small_img = pil_img.resize((small_w, small_h), Image.Resampling.BOX)
+
+            print("Dithering downscaled image...")
+            dithered_small_img = self.floyd_steinberg_numpy(small_img, threshold, pixel_scale=1)
+
+            print(f"Upscaling back to {orig_w}x{orig_h}")
+            dithered_large_img = dithered_small_img.resize((orig_w, orig_h), Image.Resampling.NEAREST)
+            return dithered_large_img
+
+    def simple_threshold(self, pil_img, threshold=128, pixel_scale=1):
+        if pixel_scale <= 0:
+            pixel_scale = 1
+
+        img_gray = pil_img.convert('L')
+
+        if pixel_scale == 1:
+            return img_gray.point(lambda p: 0 if p < threshold else 255)
+        else:
+            orig_w, orig_h = img_gray.size
+            out_img = Image.new('L', (orig_w, orig_h))
+            out_pixels = out_img.load()
+
+            print(f"Applying simple threshold with scale {pixel_scale}")
+            for y0 in range(0, orig_h, pixel_scale):
+                for x0 in range(0, orig_w, pixel_scale):
+                    x1 = min(x0 + pixel_scale, orig_w)
+                    y1 = min(y0 + pixel_scale, orig_h)
+                    box = (x0, y0, x1, y1)
+
+                    if box[2] - box[0] <= 0 or box[3] - box[1] <= 0:
+                        continue
+
+                    block = img_gray.crop(box)
+                    stat = ImageStat.Stat(block)
+                    avg_val = stat.mean[0]
+
+                    block_color = 0 if avg_val < threshold else 255
+
+                    for y in range(y0, y1):
+                        for x in range(x0, x1):
+                            out_pixels[x, y] = block_color
+            return out_img
 
     def open_image(self):
         path = filedialog.askopenfilename(
@@ -127,23 +229,56 @@ class DitherApp:
         if not path:
             return
         self.open_path = path
-        self.original_image = Image.open(path)
+        try:
+            self.original_image = Image.open(path)
+        except Exception as e:
+            print(f"Error opening image: {e}")
+            self.original_image = None
+            self.dithered_image = None
+            self.update_image_display(self.lbl_original, None)
+            self.update_image_display(self.lbl_dithered, None)
+            self.save_button.config(state=tk.DISABLED)
+            return # Stop further processing on error
+            
+        # Reset dithered image display and state
         self.dithered_image = None
-        self.update_image_display(self.lbl_original, self.original_image)
+        self.update_image_display(self.lbl_original, self.original_image) 
+        self.lbl_dithered.config(image='') # Clear dithered display explicitly
+        self.lbl_dithered.image = None # Clear reference for dithered display
+        
+        # Apply dither immediately if auto-render is enabled
+        if self.auto_render_var.get():
+            print("Auto-rendering after image open.") # Debug print
+            self.apply_dither()
+            
+        # Enable save button regardless of auto-render state if image loaded
         self.save_button.config(state=tk.NORMAL)
-        self.lbl_dithered.config(image='')
 
     def apply_dither(self):
         if not self.original_image:
             return
+
         alg = self.algorithm_var.get()
         thr = int(self.threshold_slider.get())
-        print(f"Applying {alg} with threshold {thr}")
+        contrast_factor = self.contrast_var.get()
+        pixel_s = self.scale_var.get()
+
+        print(f"Applying {alg} with threshold {thr}, contrast {contrast_factor:.2f}, scale {pixel_s}")
+
+        image_to_dither = self.original_image
+        if abs(contrast_factor - 1.0) > 0.01:
+            try:
+                enhancer = ImageEnhance.Contrast(self.original_image)
+                image_to_dither = enhancer.enhance(contrast_factor)
+                print("Applied contrast adjustment.")
+            except Exception as e:
+                print(f"Error applying contrast: {e}")
+                image_to_dither = self.original_image
 
         if alg == "Floyd-Steinberg":
-            self.dithered_image = self.floyd_steinberg_numpy(self.original_image, thr)
+            self.dithered_image = self.floyd_steinberg_numpy(image_to_dither, thr, pixel_s)
         elif alg == "Simple Threshold":
-            self.dithered_image = self.simple_threshold(self.original_image, thr)
+            self.dithered_image = self.simple_threshold(image_to_dither, thr, pixel_s)
         else:
             self.dithered_image = None
 
@@ -173,4 +308,4 @@ class DitherApp:
 if __name__ == "__main__":
     root = tk.Tk()
     app = DitherApp(root)
-    root.mainloop()
+root.mainloop()
