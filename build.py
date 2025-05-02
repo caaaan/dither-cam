@@ -2,21 +2,7 @@ import platform
 import subprocess
 import os
 import shutil
-
-# --- Configuration ---
-APP_NAME = "Dither3000"
-SCRIPT_NAME = "main.py"
-ICON = "ditherer.ico" # Put your custom icon in the root directory 
-REMOVE_SPEC = True # Remove the spec file after build
-
-pyinstaller_cmd = [      # Base PyInstaller command
-    "pyinstaller",
-    "--windowed",        # For GUI apps (no console)
-    "--name", APP_NAME,  # Set the application name
-    "--onefile",       # Uncomment if you prefer a single file build
-]
-# --- End Configuration ---
-
+import config
 def run_pyinstaller(command):
     """Runs a PyInstaller command and prints output."""
     print(f"Running PyInstaller: {' '.join(command)}")
@@ -29,14 +15,14 @@ def run_pyinstaller(command):
         print("Build done, cleaning up...")
 
         # Remove spec file after build
-        if REMOVE_SPEC:
-            spec_file = f"{APP_NAME}.spec"
+        if config.REMOVE_SPEC:
+            spec_file = f"{config.APP_NAME}.spec"
             if os.path.isfile(spec_file):
                 print(f"Removing spec file: {spec_file}")
                 os.remove(spec_file)
 
         print("\nBuild successful!")
-        print(f"Build complete, enjoy {APP_NAME}!")
+        print(f"Build complete, enjoy {config.APP_NAME}!")
     except subprocess.CalledProcessError as e:
         print("!!! PyInstaller failed !!!")
         print(f"Return code: {e.returncode}")
@@ -60,7 +46,7 @@ def clean_build():
             shutil.rmtree(folder)
 
     # Remove spec file if it exists
-    spec_file = f"{os.path.splitext(SCRIPT_NAME)[0]}.spec"
+    spec_file = f"{os.path.splitext(config.SCRIPT_NAME)[0]}.spec"
     if os.path.isfile(spec_file):
             print(f"Removing file: {spec_file}")
             os.remove(spec_file)
@@ -77,16 +63,16 @@ clean_build()
 
 # Add OS-specific icon
 if current_os == "Windows" or current_os == "Darwin":
-    if os.path.exists(ICON):
-        pyinstaller_cmd.extend(["--icon", ICON])
+    if os.path.exists(config.ICON):
+        config.pyinstaller_cmd.extend(["--icon", config.ICON])
     else:
-        print(f"Warning: icon '{ICON}' not found. Building without icon.")
+        print(f"Warning: icon '{config.ICON}' not found. Building without icon.")
 else: # Linux or other
     print("Note: Linux icons are typically handled via .desktop files, not directly in the executable.")
     # No specific icon flag added for generic Linux builds via PyInstaller
 
 # Add the main script
-pyinstaller_cmd.append(SCRIPT_NAME)
+config.pyinstaller_cmd.append(config.SCRIPT_NAME)
 
 # Run the build command
-run_pyinstaller(pyinstaller_cmd)
+run_pyinstaller(config.pyinstaller_cmd)

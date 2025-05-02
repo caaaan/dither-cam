@@ -2,13 +2,12 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from PIL import Image, ImageTk, ImageEnhance, ImageStat, ImageFilter
 import numpy as np
-import subprocess
-import os
+import subprocess, os, config
 
 class DitherApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Image Ditherer")
+        self.root.title(config.APP_NAME)
         self.root.geometry("1200x800")
         self.original_image = None
         self.dithered_image = None
