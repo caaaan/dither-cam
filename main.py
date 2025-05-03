@@ -3,7 +3,8 @@ from tkinter import filedialog, ttk
 from PIL import Image, ImageTk, ImageEnhance, ImageStat, ImageFilter
 import numpy as np
 import subprocess, os, config
-
+from numba import njit
+from helper import fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither
 class DitherApp:
     def __init__(self, root):
         self.root = root
@@ -158,7 +159,7 @@ class DitherApp:
     def update_rgb_or_greyscale_label(self, value):
         # No label to update, just a checkbox toggle
         pass
-
+    
     def floyd_steinberg_numpy(self, pil_img, threshold=128, pixel_scale=1):
         if pixel_scale <= 0:
             pixel_scale = 1
@@ -171,26 +172,9 @@ class DitherApp:
         if pixel_scale == 1:
             img = pil_img.convert(type)
             arr = np.array(img, dtype=np.float32)
+            print("type", type)
+            arr = fs_dither(arr, type, threshold)    
             
-            if type == 'RGB':
-                h, w, c = arr.shape
-            elif type == 'L':
-                h, w = arr.shape
-                
-            for y in range(h):
-                for x in range(w):
-                    old = arr[y, x].copy()
-                    new = np.where(old < threshold, 0, 255)
-                    err = old - new
-                    arr[y, x] = new
-                    if x+1 < w:
-                        arr[y, x+1] += err * 7/16
-                    if y+1 < h:
-                        if x > 0: arr[y+1, x-1] += err * 3/16
-                        arr[y+1, x] += err * 5/16
-                        if x+1 < w: arr[y+1, x+1] += err * 1/16
-            
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
             return Image.fromarray(arr)
         else:
             orig_w, orig_h = pil_img.size
@@ -206,7 +190,9 @@ class DitherApp:
             print(f"Upscaling back to {orig_w}x{orig_h}")
             dithered_large_img = dithered_small_img.resize((orig_w, orig_h), Image.Resampling.NEAREST)
             return dithered_large_img
+    
 
+    
     def simple_threshold(self, pil_img, threshold=128, pixel_scale=1):
         if pixel_scale <= 0:
             pixel_scale = 1
@@ -221,13 +207,7 @@ class DitherApp:
             if type == 'RGB':
                 # Process each band separately for RGB using NumPy
                 img_array = np.array(img_gray)
-                result = np.zeros_like(img_array)
-                
-                # Apply threshold to each channel independently
-                for c in range(img_array.shape[2]):
-                    channel = img_array[:, :, c]
-                    result[:, :, c] = np.where(channel < threshold, 0, 255)
-                
+                result = simple_threshold_rgb_ps1(img_array, threshold)
                 return Image.fromarray(result.astype(np.uint8))
             else:
                 # For grayscale, use PIL's point for threshold (faster for single channel)
@@ -235,45 +215,14 @@ class DitherApp:
         else:
             # For larger pixel scales, we need the block-based approach
             orig_w, orig_h = img_gray.size
-            out_img = Image.new(type, (orig_w, orig_h))
-            out_pixels = out_img.load()
-
-            print(f"Applying simple threshold with scale {pixel_scale}")
             
-            # Standard processing for all images
-            for y0 in range(0, orig_h, pixel_scale):
-                for x0 in range(0, orig_w, pixel_scale):
-                    x1 = min(x0 + pixel_scale, orig_w)
-                    y1 = min(y0 + pixel_scale, orig_h)
-                    box = (x0, y0, x1, y1)
-
-                    if box[2] - box[0] <= 0 or box[3] - box[1] <= 0:
-                        continue
-
-                    block = img_gray.crop(box)
-                    stat = ImageStat.Stat(block)
-                    
-                    if type == 'RGB':
-                        # For RGB, process each channel separately
-                        means = stat.mean
-                        if len(means) == 3:  # Should be R, G, B
-                            r_val = 0 if means[0] < threshold else 255
-                            g_val = 0 if means[1] < threshold else 255
-                            b_val = 0 if means[2] < threshold else 255
-                            block_color = (r_val, g_val, b_val)
-                        else:
-                            # Fallback in case of unexpected channel count
-                            avg_val = sum(means) / len(means)
-                            block_color = (0, 0, 0) if avg_val < threshold else (255, 255, 255)
-                    else:
-                        # For grayscale, use the single channel
-                        avg_val = stat.mean[0]
-                        block_color = 0 if avg_val < threshold else 255
-
-                    for y in range(y0, y1):
-                        for x in range(x0, x1):
-                            out_pixels[x, y] = block_color
-            return out_img
+            # Convert to numpy array
+            img_array = np.array(img_gray)
+            
+            # Create output array of same shape
+            out_array = simple_threshold_dither(img_array, type, pixel_scale, orig_w, orig_h, threshold)
+            
+            return Image.fromarray(out_array)
 
     def open_image(self):
         path = filedialog.askopenfilename(
