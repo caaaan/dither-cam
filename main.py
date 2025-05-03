@@ -13,7 +13,7 @@ class DitherApp:
         self.dithered_image = None
         # Auto-render state
         self.auto_render_var = tk.BooleanVar(value=True)
-
+        self.rgb_or_greyscale_var = tk.BooleanVar(value=True)
         # --- Layout ---
         self.root.grid_rowconfigure(1, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
@@ -56,6 +56,9 @@ class DitherApp:
         # Add Auto-Render Checkbutton
         auto_render_check = ttk.Checkbutton(top_frame, text="Auto-Render", variable=self.auto_render_var)
         auto_render_check.grid(row=0, column=8, padx=5, pady=2, sticky='e')
+
+        rgb_or_greyscale_check = ttk.Checkbutton(top_frame, text="color", variable=self.rgb_or_greyscale_var)
+        rgb_or_greyscale_check.grid(row=0, column=9, padx=5, pady=2, sticky='e')
 
         image_frame = tk.Frame(root)
         image_frame.grid(row=1, column=0, sticky='nsew', padx=10, pady=5)
@@ -129,6 +132,11 @@ class DitherApp:
         if self.auto_render_var.get():
             self.apply_dither()
 
+    def update_rgb_or_greyscale_and_apply(self, value):
+        self.update_rgb_or_greyscale_label(value)
+        if self.auto_render_var.get():
+            self.apply_dither()
+
     def apply_dither_event_wrapper(self, event=None):
         if self.auto_render_var.get():
             self.root.after(10, self.apply_dither)
@@ -150,8 +158,12 @@ class DitherApp:
         if pixel_scale <= 0:
             pixel_scale = 1
 
-        if pixel_scale == 1:
+        if self.rgb_or_greyscale_var.get():
+            type = 'RGB'
+        else:
             type = 'F'
+
+        if pixel_scale == 1:
             img = pil_img.convert(type)
             arr = np.array(img, dtype=np.float32)
             if(type == 'RGB'):
