@@ -57,7 +57,8 @@ class DitherApp:
         auto_render_check = ttk.Checkbutton(top_frame, text="Auto-Render", variable=self.auto_render_var)
         auto_render_check.grid(row=0, column=8, padx=5, pady=2, sticky='e')
 
-        rgb_or_greyscale_check = ttk.Checkbutton(top_frame, text="color", variable=self.rgb_or_greyscale_var)
+        rgb_or_greyscale_check = ttk.Checkbutton(top_frame, text="Color", variable=self.rgb_or_greyscale_var, 
+                                               command=lambda: self.update_rgb_or_greyscale_and_apply(None))
         rgb_or_greyscale_check.grid(row=0, column=9, padx=5, pady=2, sticky='e')
 
         image_frame = tk.Frame(root)
@@ -154,6 +155,10 @@ class DitherApp:
         self.scale_var.set(val)
         self.lbl_sca_val.config(text=str(val))
 
+    def update_rgb_or_greyscale_label(self, value):
+        # No label to update, just a checkbox toggle
+        pass
+
     def floyd_steinberg_numpy(self, pil_img, threshold=128, pixel_scale=1):
         if pixel_scale <= 0:
             pixel_scale = 1
@@ -161,15 +166,17 @@ class DitherApp:
         if self.rgb_or_greyscale_var.get():
             type = 'RGB'
         else:
-            type = 'F'
+            type = 'L'
 
         if pixel_scale == 1:
             img = pil_img.convert(type)
             arr = np.array(img, dtype=np.float32)
-            if(type == 'RGB'):
+            
+            if type == 'RGB':
                 h, w, c = arr.shape
-            elif(type == 'F'):
+            elif type == 'L':
                 h, w = arr.shape
+                
             for y in range(h):
                 for x in range(w):
                     old = arr[y, x].copy()
@@ -182,6 +189,7 @@ class DitherApp:
                         if x > 0: arr[y+1, x-1] += err * 3/16
                         arr[y+1, x] += err * 5/16
                         if x+1 < w: arr[y+1, x+1] += err * 1/16
+            
             arr = np.clip(arr, 0, 255).astype(np.uint8)
             return Image.fromarray(arr)
         else:
@@ -203,16 +211,36 @@ class DitherApp:
         if pixel_scale <= 0:
             pixel_scale = 1
 
-        img_gray = pil_img.convert('L')
+        if self.rgb_or_greyscale_var.get():
+            type = 'RGB'
+        else:
+            type = 'L'
+        img_gray = pil_img.convert(type)
 
         if pixel_scale == 1:
-            return img_gray.point(lambda p: 0 if p < threshold else 255)
+            if type == 'RGB':
+                # Process each band separately for RGB using NumPy
+                img_array = np.array(img_gray)
+                result = np.zeros_like(img_array)
+                
+                # Apply threshold to each channel independently
+                for c in range(img_array.shape[2]):
+                    channel = img_array[:, :, c]
+                    result[:, :, c] = np.where(channel < threshold, 0, 255)
+                
+                return Image.fromarray(result.astype(np.uint8))
+            else:
+                # For grayscale, use PIL's point for threshold (faster for single channel)
+                return img_gray.point(lambda p: 0 if p < threshold else 255)
         else:
+            # For larger pixel scales, we need the block-based approach
             orig_w, orig_h = img_gray.size
-            out_img = Image.new('L', (orig_w, orig_h))
+            out_img = Image.new(type, (orig_w, orig_h))
             out_pixels = out_img.load()
 
             print(f"Applying simple threshold with scale {pixel_scale}")
+            
+            # Standard processing for all images
             for y0 in range(0, orig_h, pixel_scale):
                 for x0 in range(0, orig_w, pixel_scale):
                     x1 = min(x0 + pixel_scale, orig_w)
@@ -224,9 +252,23 @@ class DitherApp:
 
                     block = img_gray.crop(box)
                     stat = ImageStat.Stat(block)
-                    avg_val = stat.mean[0]
-
-                    block_color = 0 if avg_val < threshold else 255
+                    
+                    if type == 'RGB':
+                        # For RGB, process each channel separately
+                        means = stat.mean
+                        if len(means) == 3:  # Should be R, G, B
+                            r_val = 0 if means[0] < threshold else 255
+                            g_val = 0 if means[1] < threshold else 255
+                            b_val = 0 if means[2] < threshold else 255
+                            block_color = (r_val, g_val, b_val)
+                        else:
+                            # Fallback in case of unexpected channel count
+                            avg_val = sum(means) / len(means)
+                            block_color = (0, 0, 0) if avg_val < threshold else (255, 255, 255)
+                    else:
+                        # For grayscale, use the single channel
+                        avg_val = stat.mean[0]
+                        block_color = 0 if avg_val < threshold else 255
 
                     for y in range(y0, y1):
                         for x in range(x0, x1):
