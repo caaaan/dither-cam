@@ -322,7 +322,11 @@ class CameraCaptureThread(QThread):
                         np.copyto(self.frame_buffer, frame)
                         
                         # Process based on mode
-                        if self.app.rgb_mode.isChecked():
+                        if self.app.pass_through_mode.isChecked():
+                            # Pass-through mode - skip all processing
+                            pil_result = Image.fromarray(frame)
+                            self.frameProcessed.emit(pil_result)
+                        elif self.app.rgb_mode.isChecked():
                             # RGB mode
                             processed_array = self.process_frame_array(self.frame_buffer, 'RGB')
                         else:
@@ -332,8 +336,8 @@ class CameraCaptureThread(QThread):
                             # Process grayscale
                             processed_array = self.process_frame_array(gray, 'L')
                         
-                        # Convert to PIL image for display
-                        if processed_array is not None:
+                        # Convert to PIL image for display (only for non pass-through mode)
+                        if not self.app.pass_through_mode.isChecked() and processed_array is not None:
                             if processed_array.ndim == 3:
                                 pil_result = Image.fromarray(processed_array, 'RGB')
                             else:
@@ -567,51 +571,43 @@ class FrameProcessingThread(QThread):
                 # Make sure we have a proper RGB frame
                 if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
                     try:
-                        # Convert to grayscale directly in NumPy if needed
-                        if not self.app.rgb_mode.isChecked():
-                            # Create or reuse grayscale buffer
-                            if gray_np_buffer is None or gray_np_buffer.shape[:2] != frame.shape[:2]:
-                                # Grayscale conversion directly in NumPy
-                                gray_np_buffer = np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
-                            else:
-                                # Reuse buffer, just update values
-                                np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140], out=gray_np_buffer)
-                            
-                            # Process grayscale NumPy array directly
-                            processed_array = self.process_frame_array(gray_np_buffer, 'L')
-                        else:
-                            # Process RGB NumPy array directly
-                            processed_array = self.process_frame_array(frame, 'RGB')
-                        
-                        if processed_array is not None:
-                            # Only convert to PIL at the very end for display
-                            if processed_array.ndim == 3:
-                                # RGB array
-                                pil_result = Image.fromarray(processed_array, 'RGB')
-                            else:
-                                # Grayscale array
-                                pil_result = Image.fromarray(processed_array, 'L')
+                        # Check if pass-through mode is enabled
+                        if self.app.pass_through_mode.isChecked():
+                            # Skip all processing in pass-through mode
+                            pil_result = Image.fromarray(frame)
                             
                             # Emit processed frame - only if we're still running
                             if self.is_running:
                                 self.frameProcessed.emit(pil_result)
-                        
-                        # Update processing time statistics for adaptive timing
-                        process_end = time.time()
-                        process_time = process_end - process_start
-                        
-                        # Exponential moving average for process time
-                        self.avg_process_time = 0.9 * self.avg_process_time + 0.1 * process_time
-                        
-                        # Report FPS every 5 seconds
-                        self.processed_count += 1
-                        current_time = time.time()
-                        if current_time - last_report_time > 5.0:
-                            fps = self.processed_count / (current_time - last_report_time)
-                            print(f"Frame processing rate: {fps:.1f} FPS, avg process time: {self.avg_process_time*1000:.1f}ms")
-                            self.processed_count = 0
-                            last_report_time = current_time
+                        else:
+                            # Convert to grayscale directly in NumPy if needed
+                            if not self.app.rgb_mode.isChecked():
+                                # Create or reuse grayscale buffer
+                                if gray_np_buffer is None or gray_np_buffer.shape[:2] != frame.shape[:2]:
+                                    # Grayscale conversion directly in NumPy
+                                    gray_np_buffer = np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                                else:
+                                    # Reuse buffer, just update values
+                                    np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140], out=gray_np_buffer)
+                                
+                                # Process grayscale NumPy array directly
+                                processed_array = self.process_frame_array(gray_np_buffer, 'L')
+                            else:
+                                # Process RGB NumPy array directly
+                                processed_array = self.process_frame_array(frame, 'RGB')
                             
+                            if processed_array is not None:
+                                # Only convert to PIL at the very end for display
+                                if processed_array.ndim == 3:
+                                    # RGB array
+                                    pil_result = Image.fromarray(processed_array, 'RGB')
+                                else:
+                                    # Grayscale array
+                                    pil_result = Image.fromarray(processed_array, 'L')
+                                
+                                # Emit processed frame - only if we're still running
+                                if self.is_running:
+                                    self.frameProcessed.emit(pil_result)
                     except Exception as e:
                         print(f"Error processing frame: {e}")
                         import traceback
@@ -623,6 +619,22 @@ class FrameProcessingThread(QThread):
                 import traceback
                 traceback.print_exc()
                 # Don't exit the loop for occasional errors
+            
+            # Update processing time statistics for adaptive timing
+            process_end = time.time()
+            process_time = process_end - process_start
+            
+            # Exponential moving average for process time
+            self.avg_process_time = 0.9 * self.avg_process_time + 0.1 * process_time
+            
+            # Report FPS every 5 seconds
+            self.processed_count += 1
+            current_time = time.time()
+            if current_time - last_report_time > 5.0:
+                fps = self.processed_count / (current_time - last_report_time)
+                print(f"Frame processing rate: {fps:.1f} FPS, avg process time: {self.avg_process_time*1000:.1f}ms")
+                self.processed_count = 0
+                last_report_time = current_time
         
         print("Processing thread stopped")
 
@@ -1044,6 +1056,12 @@ class DitherApp(QMainWindow):
         self.rgb_mode.stateChanged.connect(self.rgb_changed)
         checkbox_layout.addWidget(self.rgb_mode)
         
+        # Add pass-through mode checkbox
+        self.pass_through_mode = QCheckBox("Pass-through")
+        self.pass_through_mode.setChecked(False)
+        self.pass_through_mode.stateChanged.connect(self.pass_through_changed)
+        checkbox_layout.addWidget(self.pass_through_mode)
+        
         self.control_layout.addWidget(checkbox_container, 0, Qt.AlignmentFlag.AlignCenter)
         
         # Create Apply Dither button (will be added to its own group later)
@@ -1325,7 +1343,12 @@ class DitherApp(QMainWindow):
         if not self.original_image or not self.dithered_image:
             return
         
+        # Update showing_original flag
         self.showing_original = not self.showing_original
+        
+        # If we're in pass-through mode, disable it when switching to dithered view
+        if not self.showing_original and self.pass_through_mode.isChecked():
+            self.pass_through_mode.setChecked(False)
         
         if self.showing_original:
             self.display_image(self.original_image)
@@ -1484,6 +1507,15 @@ class DitherApp(QMainWindow):
         if not self.original_image:
             return
         
+        # In pass-through mode, just display the original image
+        if self.pass_through_mode.isChecked():
+            self.dithered_image = self.original_image
+            self.showing_original = True
+            self.toggle_button.setText("Switch to Dithered Image")
+            self.toggle_button.setEnabled(True)
+            self.display_image(self.original_image)
+            return
+            
         alg = self.algorithm_combo.currentText()
         thr = self.threshold_slider.value()
         contrast_factor = self.contrast_slider.value() / 100.0
@@ -1691,6 +1723,19 @@ class DitherApp(QMainWindow):
             # Fall back to PIL-based method if no array is available
             self.apply_dither()
             return
+            
+        # In pass-through mode, just display the original array as an image
+        if self.pass_through_mode.isChecked():
+            if len(self.original_array.shape) == 3:
+                self.dithered_image = Image.fromarray(self.original_array, 'RGB')
+            else:
+                self.dithered_image = Image.fromarray(self.original_array, 'L')
+            
+            self.showing_original = True
+            self.toggle_button.setText("Switch to Dithered Image")
+            self.toggle_button.setEnabled(True)
+            self.display_image(self.dithered_image)
+            return
         
         alg = self.algorithm_combo.currentText()
         thr = self.threshold_slider.value()
@@ -1782,6 +1827,27 @@ class DitherApp(QMainWindow):
                 self.display_image(self.dithered_image)
         else:
             print("Error: Dithering result is None")
+
+    def pass_through_changed(self):
+        """Called when the Pass-through checkbox state changes"""
+        print(f"Pass-through mode changed to: {self.pass_through_mode.isChecked()}")
+        
+        # If in camera mode, immediately apply the change
+        if self.camera_mode_active:
+            print("Applying pass-through mode change to camera feed")
+            
+        # For static images, apply the change if auto-render is on
+        if self.auto_render.isChecked() and self.original_image is not None:
+            if self.pass_through_mode.isChecked():
+                # In pass-through mode, display original image
+                self.display_image(self.original_image)
+                self.showing_original = True
+                self.toggle_button.setText("Switch to Dithered Image")
+            else:
+                # Apply dithering when exiting pass-through mode
+                self.apply_dither()
+                self.showing_original = False
+                self.toggle_button.setText("Switch to Original Image")
 
 if __name__ == "__main__":
     # Try to ensure clean camera state at application startup
