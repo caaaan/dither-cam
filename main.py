@@ -32,6 +32,13 @@ class CameraCaptureThread(QThread):
         self.camera_initialized = False
         self.camera_lock = threading.Lock()  # Add lock for thread safety
         
+        # Add buffer reuse to reduce memory allocation
+        self.frame_buffer = None  # Will be initialized on first frame capture
+        
+        # Timing control for better thread synchronization
+        self.last_capture_time = 0
+        self.min_capture_interval = 0.033  # ~30fps maximum (33ms)
+        
     def run(self):
         print("Camera capture thread starting...")
         
@@ -42,89 +49,49 @@ class CameraCaptureThread(QThread):
         self.is_running = True
         
         try:
-            # Try multiple initialization attempts if needed
+            # Try to initialize camera with a simpler approach
             max_attempts = 3
+            self.camera = None
+            self.camera_initialized = False
+            
             for attempt in range(max_attempts):
                 try:
-                    # Force release camera at system level before trying to initialize
-                    try:
-                        # Try to force close any existing camera instances at system level
-                        import os
-                        import subprocess
-                        
-                        print(f"Camera initialization attempt {attempt+1}/{max_attempts}")
-                        
-                        # Kill any existing camera processes
-                        os.system("sudo pkill -f libcamera")
-                        time.sleep(1)
-                        
-                        # Try a quick camera capture with native tool to reset
-                        try:
-                            subprocess.run(["sudo", "libcamera-still", "-t", "1", "--immediate"], 
-                                           stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=3)
-                        except subprocess.TimeoutExpired:
-                            print("libcamera-still timed out, continuing anyway")
-                            
-                        time.sleep(2)
-                        print("Attempted system-level camera reset")
-                        
-                        # Force garbage collection
-                        import gc
-                        gc.collect()
-                    except Exception as e:
-                        print(f"System-level camera reset failed (non-critical): {e}")
+                    print(f"Camera initialization attempt {attempt+1}/{max_attempts}")
                     
+                    # First attempt: simplest initialization
                     with self.camera_lock:
-                        # Initialize camera with different approach for each attempt
-                        if attempt == 0:
-                            # Standard initialization
-                            self.camera = Picamera2()
-                        elif attempt == 1:
-                            # Try with specific camera ID
-                            self.camera = Picamera2(camera_num=0)
-                        else:
-                            # Try with explicit hardware configuration
-                            from picamera2.configuration import create_preview_configuration
-                            self.camera = Picamera2()
+                        self.camera = Picamera2()
                         
-                        # Force some delay between creating the camera object and configuring it
-                        time.sleep(2)
+                        # Wait before configuring
+                        time.sleep(2.0)
                         
-                        # Configure camera with different options based on attempt
-                        if attempt == 0:
-                            # Standard preview configuration
-                            preview_config = self.camera.create_preview_configuration(
-                                main={"size": (640, 480), "format": "RGB888"},
-                                controls={"FrameDurationLimits": (33333, 33333)}  # ~30fps
-                            )
-                        elif attempt == 1:
-                            # Simpler configuration
-                            preview_config = self.camera.create_preview_configuration()
-                            preview_config["main"]["size"] = (640, 480)
-                            preview_config["main"]["format"] = "RGB888"
-                        else:
-                            # Minimal configuration
-                            preview_config = self.camera.create_preview_configuration(
-                                main={"size": (640, 480)}
-                            )
+                        # Use the simplest configuration possible
+                        preview_config = self.camera.create_still_configuration(
+                            main={"size": (640, 480), "format": "RGB888"}
+                        )
                         
                         print(f"Using camera config: {preview_config}")
                         self.camera.configure(preview_config)
                         
-                        # Wait more before starting
-                        time.sleep(2)
+                        # Wait before starting
+                        time.sleep(2.0)
                         
-                        # Start camera
                         print("Starting camera...")
                         self.camera.start()
                         
-                        # Wait a moment for camera to initialize
-                        time.sleep(2.0)
-                        self.camera_initialized = True
-                        print("Camera initialized successfully")
+                        # Wait for camera to initialize
+                        time.sleep(3.0)
                         
-                        # If we got here, initialization succeeded
-                        break
+                        # Test by capturing one frame - if this succeeds, camera is working
+                        test_frame = self.camera.capture_array()
+                        if test_frame is not None:
+                            print(f"Test frame captured successfully: {test_frame.shape}")
+                            self.camera_initialized = True
+                            print("Camera initialized successfully")
+                            break
+                        else:
+                            raise RuntimeError("Test frame capture returned None")
+                            
                 except Exception as e:
                     print(f"Camera initialization attempt {attempt+1} failed: {e}")
                     import traceback
@@ -132,17 +99,18 @@ class CameraCaptureThread(QThread):
                     
                     # Clean up resources before trying again
                     try:
-                        if hasattr(self, 'camera') and self.camera is not None:
+                        if self.camera is not None:
                             self.camera.close()
-                    except:
+                    except Exception:
                         pass
+                    
                     self.camera = None
                     self.camera_initialized = False
                     
-                    # Wait before next attempt
-                    time.sleep(2)
+                    # Wait longer before next attempt
+                    time.sleep(3.0)
                     
-                    # Last attempt failed
+                    # If this was the last attempt, give up
                     if attempt == max_attempts - 1:
                         print("All camera initialization attempts failed")
                         self.is_running = False
@@ -151,11 +119,27 @@ class CameraCaptureThread(QThread):
             # Main capture loop - only reached if initialization succeeded
             frames_captured = 0
             last_report_time = time.time()
+            self.last_capture_time = time.time()
                 
             while self.is_running:
                 if not self.camera_initialized or self.camera is None:
                     print("Camera not properly initialized, stopping thread")
                     break
+                
+                # Thread synchronization: Control capture rate
+                current_time = time.time()
+                time_since_last_capture = current_time - self.last_capture_time
+                
+                # Limit capture rate to avoid overloading the processing thread
+                if time_since_last_capture < self.min_capture_interval:
+                    # Sleep precisely the required amount to maintain timing
+                    sleep_time = self.min_capture_interval - time_since_last_capture
+                    if sleep_time > 0.001:  # Only sleep for meaningful intervals
+                        time.sleep(sleep_time)
+                    continue
+                
+                # Update last capture time
+                self.last_capture_time = time.time()
                     
                 try:
                     # Check if we should still be running before capturing
@@ -186,9 +170,22 @@ class CameraCaptureThread(QThread):
                         if frame.shape[2] == 4:  # If RGBA format
                             frame = frame[:, :, :3]  # Convert to RGB by removing alpha
                         
-                        # Always put RGB frames in the queue - conversion to grayscale happens in processing thread
-                        if not self.frame_queue.full():
-                            self.frame_queue.put(frame.copy())  # Make a copy to avoid reference issues
+                        # Check if queue has room before processing further
+                        if self.frame_queue.full():
+                            # Skip this frame if queue is full - processor can't keep up
+                            print("Frame queue full, dropping frame")
+                            continue
+                            
+                        # Reuse buffer if possible to reduce memory allocations
+                        if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
+                            # First frame or shape changed, create new buffer
+                            self.frame_buffer = np.empty_like(frame)
+                            
+                        # Copy frame data to buffer instead of creating a new array
+                        np.copyto(self.frame_buffer, frame)
+                        
+                        # Put buffer in queue - processing thread will use it before we modify it again
+                        self.frame_queue.put(self.frame_buffer)
                     else:
                         print(f"Invalid frame format: {frame.shape if frame is not None else None}")
                         
@@ -198,9 +195,6 @@ class CameraCaptureThread(QThread):
                     if "device" in str(e).lower() or "resource" in str(e).lower():
                         print("Device error detected, exiting capture loop")
                         break
-                    
-                # Sleep to maintain frame rate
-                time.sleep(0.03)  # ~30 FPS
                 
         except Exception as e:
             print(f"Critical error in camera capture thread: {e}")
@@ -217,17 +211,22 @@ class CameraCaptureThread(QThread):
             if self.camera is not None:
                 try:
                     print("Stopping camera device...")
+                    # First stop the camera stream
                     self.camera.stop()
-                    # Set to None immediately to prevent reuse
-                    camera_ref = self.camera
+                    time.sleep(1.0)  # Wait for camera to stop
+                    
+                    # Then close the camera completely
+                    self.camera.close()
+                    time.sleep(0.5)
+                    
+                    # Set to None to prevent reuse
                     self.camera = None
                     self.camera_initialized = False
-                    
-                    # Now close the camera outside the critical section
-                    time.sleep(0.5)  # Give it a moment to stop properly
-                    print("Camera stopped successfully")
+                    print("Camera stopped and closed successfully")
                 except Exception as e:
                     print(f"Error stopping camera: {e}")
+                    import traceback
+                    traceback.print_exc()
                     self.camera = None
                     self.camera_initialized = False
             else:
@@ -239,6 +238,10 @@ class CameraCaptureThread(QThread):
             import gc
             gc.collect()
             time.sleep(0.5)
+            
+            # Try to force system-level cleanup as well
+            import os
+            os.system("sudo pkill -f libcamera 2>/dev/null || true")
         except Exception as e:
             print(f"Error during cleanup: {e}")
 
@@ -259,6 +262,18 @@ class FrameProcessingThread(QThread):
         self.frame_queue = frame_queue
         self.app = app_instance  # Reference to the main app for dithering settings
         print("Processing thread initialized")
+        
+        # Buffer reuse for reduced memory allocation
+        self.pil_buffer = None
+        self.result_buffer = None
+        self.rgb_buffer = None
+        self.gray_buffer = None
+        
+        # Thread synchronization - detect if we're falling behind
+        self.processed_count = 0
+        self.queue_full_count = 0
+        self.last_process_time = 0
+        self.avg_process_time = 0.03  # Initial guess: 30ms per frame
 
     def run(self):
         print("Frame processing thread starting...")
@@ -268,62 +283,94 @@ class FrameProcessingThread(QThread):
         frames_processed = 0
         last_report_time = time.time()
         
+        # Reusable buffers
+        rgb_np_buffer = None
+        gray_np_buffer = None
+        
         while self.is_running:
             try:
-                if not self.frame_queue.empty():
-                    # Get frame from the queue without blocking (to check is_running state more often)
-                    frame = self.frame_queue.get(block=False)
-                    frames_processed += 1
+                # Use timeout to ensure we regularly check if thread should stop
+                try:
+                    # Non-blocking queue get with timeout for better responsiveness
+                    frame = self.frame_queue.get(timeout=0.1)
+                except queue.Empty:
+                    # No frames to process, check queue size for monitoring
+                    if self.frame_queue.qsize() > self.frame_queue.maxsize * 0.8:
+                        self.queue_full_count += 1
+                        if self.queue_full_count % 5 == 0:
+                            print(f"Warning: Processing thread falling behind, queue {self.frame_queue.qsize()}/{self.frame_queue.maxsize}")
+                    continue
                     
-                    # Report performance periodically
-                    current_time = time.time()
-                    if current_time - last_report_time > 5.0:
-                        fps = frames_processed / (current_time - last_report_time)
-                        print(f"Processing rate: {fps:.1f} FPS")
-                        frames_processed = 0
-                        last_report_time = current_time
-                    
-                    # Make sure we have a proper RGB frame
-                    if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
-                        # Convert numpy array to PIL Image
-                        try:
-                            pil_img = Image.fromarray(frame, mode='RGB')
-                            
-                            # Apply dithering using the main app's dithering functions
-                            dithered_img = self.process_frame(pil_img)
-                            if dithered_img:
-                                # Emit processed frame - only if we're still running
-                                if self.is_running:
-                                    self.frameProcessed.emit(dithered_img)
+                process_start = time.time()
+                frames_processed += 1
+                
+                # Reset queue full counter since we got a frame
+                self.queue_full_count = 0
+                
+                # Make sure we have a proper RGB frame
+                if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
+                    try:
+                        # Convert to grayscale directly in NumPy if needed
+                        if not self.app.rgb_mode.isChecked():
+                            # Create or reuse grayscale buffer
+                            if gray_np_buffer is None or gray_np_buffer.shape[:2] != frame.shape[:2]:
+                                # Grayscale conversion directly in NumPy
+                                gray_np_buffer = np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
                             else:
-                                # If processing failed, emit the original image
-                                if self.is_running:
-                                    self.frameProcessed.emit(pil_img)
-                        except Exception as e:
-                            print(f"Error processing frame: {e}")
-                    else:
-                        # Skip this frame if format is wrong
-                        if frame is None:
-                            print("Received None frame")
+                                # Reuse buffer, just update values
+                                np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140], out=gray_np_buffer)
+                            
+                            # Process grayscale NumPy array directly
+                            processed_array = self.process_frame_array(gray_np_buffer, 'L')
                         else:
-                            print(f"Skipping frame with format: {frame.shape}")
+                            # Process RGB NumPy array directly
+                            processed_array = self.process_frame_array(frame, 'RGB')
+                        
+                        if processed_array is not None:
+                            # Only convert to PIL at the very end for display
+                            if processed_array.ndim == 3:
+                                # RGB array
+                                pil_result = Image.fromarray(processed_array, 'RGB')
+                            else:
+                                # Grayscale array
+                                pil_result = Image.fromarray(processed_array, 'L')
+                            
+                            # Emit processed frame - only if we're still running
+                            if self.is_running:
+                                self.frameProcessed.emit(pil_result)
+                        
+                        # Update processing time statistics for adaptive timing
+                        process_end = time.time()
+                        process_time = process_end - process_start
+                        
+                        # Exponential moving average for process time
+                        self.avg_process_time = 0.9 * self.avg_process_time + 0.1 * process_time
+                        
+                        # Report FPS every 5 seconds
+                        self.processed_count += 1
+                        current_time = time.time()
+                        if current_time - last_report_time > 5.0:
+                            fps = self.processed_count / (current_time - last_report_time)
+                            print(f"Frame processing rate: {fps:.1f} FPS, avg process time: {self.avg_process_time*1000:.1f}ms")
+                            self.processed_count = 0
+                            last_report_time = current_time
+                            
+                    except Exception as e:
+                        print(f"Error processing frame: {e}")
+                        import traceback
+                        traceback.print_exc()
                 else:
-                    # No frames to process, sleep a bit to prevent CPU hogging
-                    time.sleep(0.01)
-                    
-            except queue.Empty:
-                # Frame queue is empty, just continue the loop
-                time.sleep(0.01)
+                    print(f"Invalid frame format: {frame.shape if frame is not None else None}")
             except Exception as e:
-                print(f"Error in processing thread: {e}")
+                print(f"Error in processing thread main loop: {e}")
                 import traceback
                 traceback.print_exc()
-                # Don't exit the loop on error, keep trying
-
-        print("Frame processing thread stopped")
+                # Don't exit the loop for occasional errors
+        
+        print("Processing thread stopped")
 
     def process_frame(self, pil_img):
-        """Apply dithering to a PIL image based on current app settings"""
+        """Apply dithering to a frame based on current app settings"""
         try:
             # Get current settings from main app
             alg = self.app.algorithm_combo.currentText()
@@ -332,12 +379,15 @@ class FrameProcessingThread(QThread):
             pixel_s = self.app.scale_slider.value()
             use_rgb = self.app.rgb_mode.isChecked()
             
-            # Convert to appropriate mode if needed
+            # Prepare the image format as needed
             if use_rgb and pil_img.mode != 'RGB':
+                # Convert to RGB format
                 image_to_dither = pil_img.convert('RGB')
             elif not use_rgb and pil_img.mode != 'L':
+                # Convert to grayscale format
                 image_to_dither = pil_img.convert('L')
             else:
+                # Already in the right format
                 image_to_dither = pil_img
             
             # Apply contrast if needed
@@ -360,6 +410,110 @@ class FrameProcessingThread(QThread):
             return result
         except Exception as e:
             print(f"Error in process_frame: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def process_frame_array(self, array, mode):
+        """Apply dithering directly to a NumPy array based on current app settings"""
+        try:
+            # Get current settings from main app
+            alg = self.app.algorithm_combo.currentText()
+            thr = self.app.threshold_slider.value()
+            contrast_factor = self.app.contrast_slider.value() / 100.0
+            pixel_s = self.app.scale_slider.value()
+            
+            # Make a copy of the input array to avoid modifying it
+            array_to_dither = array.copy()
+            
+            # Apply contrast if needed
+            if abs(contrast_factor - 1.0) > 0.01:
+                try:
+                    # Apply contrast directly on NumPy array
+                    if mode == 'RGB':
+                        # Apply to each channel separately
+                        for c in range(3):
+                            channel = array_to_dither[:,:,c].astype(np.float32)
+                            # Simple contrast adjustment formula: f(x) = 128 + contrast_factor * (x - 128)
+                            channel = 128 + contrast_factor * (channel - 128)
+                            array_to_dither[:,:,c] = np.clip(channel, 0, 255).astype(np.uint8)
+                    else:
+                        # Grayscale
+                        gray = array_to_dither.astype(np.float32)
+                        gray = 128 + contrast_factor * (gray - 128)
+                        array_to_dither = np.clip(gray, 0, 255).astype(np.uint8)
+                except Exception as e:
+                    print(f"Error applying contrast: {e}")
+                    # Continue with original array
+            
+            # Apply selected dithering algorithm directly on NumPy array
+            if alg == "Floyd-Steinberg":
+                if pixel_s == 1:
+                    # Apply dithering directly
+                    if mode == 'RGB':
+                        result = fs_dither(array_to_dither.astype(np.float32), 'RGB', thr)
+                    else:
+                        result = fs_dither(array_to_dither.astype(np.float32), 'L', thr)
+                else:
+                    # For larger pixel scales, use downscale-dither-upscale approach
+                    # First create a smaller array by averaging blocks
+                    orig_h, orig_w = array_to_dither.shape[:2]
+                    small_h = max(1, orig_h // pixel_s)
+                    small_w = max(1, orig_w // pixel_s)
+                    
+                    if mode == 'RGB':
+                        # Resize RGB array using block averaging
+                        small_arr = np.zeros((small_h, small_w, 3), dtype=np.float32)
+                        for y in range(small_h):
+                            for x in range(small_w):
+                                y1 = min((y+1) * pixel_s, orig_h)
+                                x1 = min((x+1) * pixel_s, orig_w)
+                                block = array_to_dither[y*pixel_s:y1, x*pixel_s:x1, :]
+                                small_arr[y, x, :] = np.mean(block, axis=(0, 1))
+                        
+                        # Apply dithering to small array
+                        dithered_small = fs_dither(small_arr, 'RGB', thr)
+                        
+                        # Upscale back using nearest neighbor approach
+                        result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+                        for y in range(orig_h):
+                            for x in range(orig_w):
+                                result[y, x, :] = dithered_small[min(y // pixel_s, small_h-1), min(x // pixel_s, small_w-1), :]
+                    else:
+                        # Resize grayscale array using block averaging
+                        small_arr = np.zeros((small_h, small_w), dtype=np.float32)
+                        for y in range(small_h):
+                            for x in range(small_w):
+                                y1 = min((y+1) * pixel_s, orig_h)
+                                x1 = min((x+1) * pixel_s, orig_w)
+                                block = array_to_dither[y*pixel_s:y1, x*pixel_s:x1]
+                                small_arr[y, x] = np.mean(block)
+                        
+                        # Apply dithering to small array
+                        dithered_small = fs_dither(small_arr, 'L', thr)
+                        
+                        # Upscale back using nearest neighbor approach
+                        result = np.zeros((orig_h, orig_w), dtype=np.uint8)
+                        for y in range(orig_h):
+                            for x in range(orig_w):
+                                result[y, x] = dithered_small[min(y // pixel_s, small_h-1), min(x // pixel_s, small_w-1)]
+            elif alg == "Simple Threshold":
+                if pixel_s == 1:
+                    # Apply simple threshold directly
+                    if mode == 'RGB':
+                        result = simple_threshold_rgb_ps1(array_to_dither, thr)
+                    else:
+                        result = np.where(array_to_dither < thr, 0, 255).astype(np.uint8)
+                else:
+                    # Use block-based approach
+                    orig_h, orig_w = array_to_dither.shape[:2]
+                    result = simple_threshold_dither(array_to_dither, mode, pixel_s, orig_w, orig_h, thr)
+            else:
+                result = array_to_dither  # Fallback
+            
+            return result
+        except Exception as e:
+            print(f"Error in process_frame_array: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -712,8 +866,8 @@ class DitherApp(QMainWindow):
         if self.camera_mode_active:
             print("Camera already active, stopping first")
             self.stop_camera()
-            # Wait a moment to ensure everything is stopped
-            time.sleep(2.0)  # Increased wait time to ensure complete camera shutdown
+            # Wait longer to ensure everything is stopped
+            time.sleep(3.0)
         
         print("Starting camera...")
         
@@ -726,45 +880,48 @@ class DitherApp(QMainWindow):
             # First try to clean up any existing camera instances at the system level
             import subprocess
             import os
-            # Run the command without checking output, just to release resources
+            
+            # Run multiple cleanup commands to ensure resources are released
             os.system("sudo pkill -f libcamera")
-            time.sleep(1)
+            time.sleep(1.5)
+            
+            # Try to reset the camera system by running a quick capture with the system tool
+            try:
+                print("Attempting system-level camera reset...")
+                subprocess.run(["sudo", "libcamera-still", "-t", "1", "--immediate"], 
+                            stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=3)
+            except:
+                print("System tool timeout, continuing anyway")
+                
+            time.sleep(2.0)
             print("Attempted system-level camera cleanup")
             
             # Run garbage collection
             import gc
             gc.collect()
+            time.sleep(1.0)
         except Exception as e:
             print(f"System-level cleanup failed (non-critical): {e}")
             
-        # Always recreate threads to ensure clean state after capture
-        # This fixes the issue of camera not restarting after capture
-        if self.capture_thread:
-            del self.capture_thread  # Delete old thread
-        self.capture_thread = CameraCaptureThread(self.frame_queue)
-            
-        if self.processing_thread:
-            del self.processing_thread  # Delete old thread
-        self.processing_thread = FrameProcessingThread(self.frame_queue, self)
-        self.processing_thread.frameProcessed.connect(self.update_camera_frame)
-        
-        # Make sure threads are properly deleted
-        import gc
-        gc.collect()
-        time.sleep(0.5)
-            
-        # Start threads
+        # Create fresh thread instances
         try:
+            self.capture_thread = CameraCaptureThread(self.frame_queue)
+            self.processing_thread = FrameProcessingThread(self.frame_queue, self)
+            self.processing_thread.frameProcessed.connect(self.update_camera_frame)
+            
+            # Start threads
+            print("Starting camera threads...")
+            
+            # Start one at a time with delay in between
             if not self.capture_thread.isRunning():
                 self.capture_thread.start()
                 print("Camera capture thread started")
+                time.sleep(2.0)  # Wait longer before starting next thread
                 
             if not self.processing_thread.isRunning():
                 self.processing_thread.start()
                 print("Frame processing thread started")
-            
-            # Wait briefly to ensure threads are running
-            time.sleep(0.5)  # Increased from 0.2 to 0.5
+                time.sleep(1.0)  # Wait after starting threads
             
             # Check if threads actually started
             if not self.capture_thread.isRunning() or not self.processing_thread.isRunning():
@@ -790,8 +947,8 @@ class DitherApp(QMainWindow):
             import traceback
             traceback.print_exc()
             # Try to clean up on error
-            self.stop_camera()  
-            
+            self.stop_camera()
+    
     def stop_camera(self):
         """Stop camera capture and processing, ensuring proper synchronization"""
         print("Stopping camera...")
@@ -838,6 +995,35 @@ class DitherApp(QMainWindow):
         while not self.frame_queue.empty():
             self.frame_queue.get()
             
+        # Run additional system-level cleanup
+        try:
+            # Force close any existing camera processes at system level
+            import os
+            os.system("sudo pkill -f libcamera")
+            time.sleep(1.5)  # Give more time for system cleanup
+            
+            # Run garbage collection for Python objects
+            import gc
+            gc.collect()
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"System-level cleanup failed (non-critical): {e}")
+            
+        # Explicitly delete thread objects to ensure they're fully released
+        if self.capture_thread:
+            try:
+                del self.capture_thread
+                self.capture_thread = None
+            except:
+                pass
+            
+        if self.processing_thread:
+            try:
+                del self.processing_thread
+                self.processing_thread = None
+            except:
+                pass
+        
         # Update UI
         self.camera_button.setText("Start Camera")
         self.capture_button.setEnabled(False)
@@ -853,6 +1039,9 @@ class DitherApp(QMainWindow):
             
         # Force application to process events to update UI
         QApplication.processEvents()
+        
+        # Give the system a moment to fully release camera resources
+        time.sleep(2.0)
     
     def capture_frame(self):
         """Capture current frame and save it as the original image"""
@@ -871,40 +1060,62 @@ class DitherApp(QMainWindow):
                 frame = self.frame_queue.get()
                 
             if frame is not None:
-                # Convert to PIL image and store
+                # Save the NumPy array directly
                 print(f"Captured frame shape: {frame.shape}, dtype: {frame.dtype}")
                 
-                # Convert to the appropriate mode based on the UI setting
+                # Store the original frame as NumPy array
+                self.original_array = frame.copy()
+                
+                # Only convert to PIL for display purposes
                 if self.rgb_mode.isChecked():
-                    pil_image = Image.fromarray(frame, mode='RGB')
+                    self.original_image = Image.fromarray(frame, mode='RGB')
                 else:
                     # Convert to grayscale if not in RGB mode
                     gray_frame = np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140])
                     gray_frame = gray_frame.astype(np.uint8)
-                    pil_image = Image.fromarray(gray_frame, mode='L')
+                    self.original_image = Image.fromarray(gray_frame, mode='L')
                 
-                self.original_image = pil_image
                 print(f"Converted to PIL image: mode={self.original_image.mode}, size={self.original_image.size}")
                 
-                # Stop camera and apply dithering
+                # Stop camera completely
+                print("Stopping camera after frame capture...")
                 self.stop_camera()
                 
-                # Force camera threads to be fully cleaned up before continuing
+                # Add additional system-level cleanup
+                try:
+                    print("Performing additional system-level cleanup...")
+                    import os
+                    import time
+                    
+                    # Kill camera processes
+                    os.system("sudo pkill -f libcamera")
+                    time.sleep(2.0)
+                    
+                    # Force garbage collection
+                    import gc
+                    gc.collect()
+                    time.sleep(1.0)
+                except Exception as e:
+                    print(f"Additional cleanup error (non-critical): {e}")
+                
+                # Ensure threads are fully cleaned up
                 if self.capture_thread:
                     if self.capture_thread.isRunning():
                         print("Waiting for capture thread to finish...")
-                        self.capture_thread.wait(2000)  # Wait up to 2 seconds
+                        self.capture_thread.wait(3000)  # Wait up to 3 seconds
                     del self.capture_thread
                     self.capture_thread = None
                     
                 if self.processing_thread:
                     if self.processing_thread.isRunning():
                         print("Waiting for processing thread to finish...")
-                        self.processing_thread.wait(2000)  # Wait up to 2 seconds
+                        self.processing_thread.wait(3000)  # Wait up to 3 seconds
                     del self.processing_thread
                     self.processing_thread = None
                 
-                self.apply_dither()
+                # Apply dither to the captured frame
+                print("Applying dithering to captured frame...")
+                self.apply_dither_to_array()
                 
                 # Enable UI elements for captured image
                 if self.dithered_image:
@@ -918,7 +1129,7 @@ class DitherApp(QMainWindow):
             print(f"Error capturing frame: {e}")
             import traceback
             traceback.print_exc()
-            
+    
     def update_camera_frame(self, dithered_img):
         """Update the UI with the processed camera frame"""
         if not self.camera_mode_active:
@@ -964,10 +1175,21 @@ class DitherApp(QMainWindow):
         
         self.open_path = path
         try:
+            # Load the image
             self.original_image = Image.open(path)
-            # self.showing_original is already False from __init__
             
-            self.apply_dither() # Attempt to dither and display immediately
+            # Also store as NumPy array for direct processing
+            if self.rgb_mode.isChecked():
+                # Ensure RGB mode
+                rgb_image = self.original_image.convert('RGB')
+                self.original_array = np.array(rgb_image)
+            else:
+                # Convert to grayscale
+                gray_image = self.original_image.convert('L')
+                self.original_array = np.array(gray_image)
+            
+            # Apply dithering directly to array
+            self.apply_dither_to_array()
             self.image_viewer.set_zoom_level(1.0) # Reset zoom for the new image view
 
             if self.dithered_image:
@@ -985,7 +1207,10 @@ class DitherApp(QMainWindow):
                 
         except Exception as e:
             print(f"Error opening image: {e}")
+            import traceback
+            traceback.print_exc()
             self.original_image = None
+            self.original_array = None
             self.dithered_image = None
             self.image_viewer.set_image(None) 
             self.save_button.setEnabled(False)
@@ -1214,11 +1439,13 @@ class DitherApp(QMainWindow):
             type = 'L'
         
         if pixel_scale == 1:
-            img = pil_img.convert(type)
-            arr = np.array(img, dtype=np.float32)
+            # Convert PIL to numpy array once
+            arr = np.array(pil_img.convert(type), dtype=np.float32)
             print("type", type)
+            # Process the array directly
             arr = fs_dither(arr, type, threshold)    
             
+            # Only convert back to PIL at the end
             return Image.fromarray(arr)
         else:
             orig_w, orig_h = pil_img.size
@@ -1228,8 +1455,12 @@ class DitherApp(QMainWindow):
             print(f"Downscaling to {small_w}x{small_h}")
             small_img = pil_img.resize((small_w, small_h), Image.Resampling.BOX)
             
-            print("Dithering downscaled image...")
-            dithered_small_img = self.floyd_steinberg_numpy(small_img, threshold, pixel_scale=1)
+            # Convert to numpy and process
+            small_arr = np.array(small_img.convert(type), dtype=np.float32)
+            dithered_arr = fs_dither(small_arr, type, threshold)
+            
+            # Create PIL Image from array
+            dithered_small_img = Image.fromarray(dithered_arr)
             
             print(f"Upscaling back to {orig_w}x{orig_h}")
             dithered_large_img = dithered_small_img.resize((orig_w, orig_h), Image.Resampling.NEAREST)
@@ -1243,25 +1474,24 @@ class DitherApp(QMainWindow):
             type = 'RGB'
         else:
             type = 'L'
-        img_gray = pil_img.convert(type)
+        
+        # Convert to NumPy array once
+        img_array = np.array(pil_img.convert(type))
         
         if pixel_scale == 1:
             if type == 'RGB':
-                # Process each band separately for RGB using NumPy
-                img_array = np.array(img_gray)
+                # Process directly on NumPy array
                 result = simple_threshold_rgb_ps1(img_array, threshold)
                 return Image.fromarray(result.astype(np.uint8))
             else:
-                # For grayscale, use PIL's point for threshold (faster for single channel)
-                return img_gray.point(lambda p: 0 if p < threshold else 255)
+                # For grayscale, use NumPy for threshold instead of PIL's point
+                result = np.where(img_array < threshold, 0, 255).astype(np.uint8)
+                return Image.fromarray(result)
         else:
-            # For larger pixel scales, we need the block-based approach
-            orig_w, orig_h = img_gray.size
+            # For larger pixel scales, use the block-based approach directly on arrays
+            orig_w, orig_h = pil_img.size
             
-            # Convert to numpy array
-            img_array = np.array(img_gray)
-            
-            # Create output array of same shape
+            # Create output array from the input array
             out_array = simple_threshold_dither(img_array, type, pixel_scale, orig_w, orig_h, threshold)
             
             return Image.fromarray(out_array)
@@ -1308,6 +1538,143 @@ class DitherApp(QMainWindow):
         print("Cleanup complete, closing application")
         event.accept()
 
+    def apply_dither_to_array(self):
+        """Apply dithering to the original array directly"""
+        if not hasattr(self, 'original_array') or self.original_array is None:
+            # Fall back to PIL-based method if no array is available
+            self.apply_dither()
+            return
+        
+        alg = self.algorithm_combo.currentText()
+        thr = self.threshold_slider.value()
+        contrast_factor = self.contrast_slider.value() / 100.0
+        pixel_s = self.scale_slider.value()
+        
+        print(f"Applying {alg} with threshold {thr}, contrast {contrast_factor:.2f}, scale {pixel_s} directly to array")
+        
+        # Make a copy to avoid modifying the original
+        array_to_dither = self.original_array.copy()
+        
+        # Apply contrast if needed directly on NumPy array
+        if abs(contrast_factor - 1.0) > 0.01:
+            try:
+                # Convert to float32 for calculations
+                if self.rgb_mode.isChecked():
+                    # Apply to each channel separately
+                    for c in range(3):
+                        channel = array_to_dither[:,:,c].astype(np.float32)
+                        # Simple contrast adjustment formula: f(x) = 128 + contrast_factor * (x - 128)
+                        channel = 128 + contrast_factor * (channel - 128)
+                        array_to_dither[:,:,c] = np.clip(channel, 0, 255).astype(np.uint8)
+                else:
+                    # For grayscale, first convert RGB to gray
+                    if len(array_to_dither.shape) == 3:
+                        gray = np.dot(array_to_dither[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.float32)
+                    else:
+                        gray = array_to_dither.astype(np.float32)
+                    # Apply contrast
+                    gray = 128 + contrast_factor * (gray - 128)
+                    array_to_dither = np.clip(gray, 0, 255).astype(np.uint8)
+                print("Applied contrast adjustment to array.")
+            except Exception as e:
+                print(f"Error applying contrast: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Apply selected dithering algorithm
+        if alg == "Floyd-Steinberg":
+            if self.rgb_mode.isChecked():
+                mode = 'RGB'
+            else:
+                mode = 'L'
+                # Convert to grayscale if still in RGB
+                if len(array_to_dither.shape) == 3:
+                    array_to_dither = np.dot(array_to_dither[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+            
+            if pixel_s == 1:
+                # Apply dithering directly
+                result_array = fs_dither(array_to_dither.astype(np.float32), mode, thr)
+            else:
+                # For larger pixel scales, handle differently based on mode
+                orig_h, orig_w = array_to_dither.shape[:2]
+                small_h = max(1, orig_h // pixel_s)
+                small_w = max(1, orig_w // pixel_s)
+                
+                if mode == 'RGB':
+                    # Resize RGB array using block averaging
+                    small_arr = np.zeros((small_h, small_w, 3), dtype=np.float32)
+                    for y in range(small_h):
+                        for x in range(small_w):
+                            y1 = min((y+1) * pixel_s, orig_h)
+                            x1 = min((x+1) * pixel_s, orig_w)
+                            block = array_to_dither[y*pixel_s:y1, x*pixel_s:x1, :]
+                            small_arr[y, x, :] = np.mean(block, axis=(0, 1))
+                    
+                    # Apply dithering to small array
+                    dithered_small = fs_dither(small_arr, 'RGB', thr)
+                    
+                    # Upscale back using nearest neighbor approach
+                    result_array = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+                    for y in range(orig_h):
+                        for x in range(orig_w):
+                            result_array[y, x, :] = dithered_small[min(y // pixel_s, small_h-1), min(x // pixel_s, small_w-1), :]
+                else:
+                    # Resize grayscale array using block averaging
+                    small_arr = np.zeros((small_h, small_w), dtype=np.float32)
+                    for y in range(small_h):
+                        for x in range(small_w):
+                            y1 = min((y+1) * pixel_s, orig_h)
+                            x1 = min((x+1) * pixel_s, orig_w)
+                            block = array_to_dither[y*pixel_s:y1, x*pixel_s:x1]
+                            small_arr[y, x] = np.mean(block)
+                    
+                    # Apply dithering to small array
+                    dithered_small = fs_dither(small_arr, 'L', thr)
+                    
+                    # Upscale back using nearest neighbor approach
+                    result_array = np.zeros((orig_h, orig_w), dtype=np.uint8)
+                    for y in range(orig_h):
+                        for x in range(orig_w):
+                            result_array[y, x] = dithered_small[min(y // pixel_s, small_h-1), min(x // pixel_s, small_w-1)]
+        
+        elif alg == "Simple Threshold":
+            if self.rgb_mode.isChecked():
+                mode = 'RGB'
+            else:
+                mode = 'L'
+                # Convert to grayscale if still in RGB
+                if len(array_to_dither.shape) == 3:
+                    array_to_dither = np.dot(array_to_dither[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+            
+            if pixel_s == 1:
+                # Apply simple threshold directly
+                if mode == 'RGB':
+                    result_array = simple_threshold_rgb_ps1(array_to_dither, thr)
+                else:
+                    result_array = np.where(array_to_dither < thr, 0, 255).astype(np.uint8)
+            else:
+                # Use block-based approach
+                orig_h, orig_w = array_to_dither.shape[:2]
+                result_array = simple_threshold_dither(array_to_dither, mode, pixel_s, orig_w, orig_h, thr)
+        else:
+            result_array = array_to_dither  # Fallback
+        
+        # Convert the result array to PIL Image for display
+        if result_array is not None:
+            if len(result_array.shape) == 3:
+                self.dithered_image = Image.fromarray(result_array, 'RGB')
+            else:
+                self.dithered_image = Image.fromarray(result_array, 'L')
+            
+            # Update toggle button state
+            self.toggle_button.setEnabled(True)
+            
+            # If not showing original, update display with new dithered image
+            if not self.showing_original:
+                self.display_image(self.dithered_image)
+        else:
+            print("Error: Dithering result is None")
+
 if __name__ == "__main__":
     # Try to ensure clean camera state at application startup
     try:
@@ -1315,20 +1682,36 @@ if __name__ == "__main__":
         import subprocess
         import time
         
-        print("Cleaning up camera system at startup...")
-        # Kill any existing camera processes
+        print("Performing thorough camera system cleanup at startup...")
+        
+        # First kill any existing camera processes
         os.system("sudo pkill -f libcamera")
-        time.sleep(1)
+        time.sleep(2.0)
+        
+        # Also kill any Python processes that might be using the camera
+        os.system("sudo pkill -f python.*picamera")
+        time.sleep(1.0)
         
         # Run a quick camera capture to reset the system
-        subprocess.run(["sudo", "libcamera-still", "-t", "1", "--immediate"], 
-                       stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-        time.sleep(1)
-        print("Camera system reset complete")
+        try:
+            subprocess.run(["sudo", "libcamera-still", "-t", "1", "--immediate"], 
+                        stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=3)
+        except:
+            print("libcamera-still command timed out, this is normal")
+            
+        # Give system time to release resources
+        time.sleep(2.0)
+        
+        # Force the libcamera system service to restart
+        os.system("sudo systemctl restart libcamera.service 2>/dev/null || true")
+        time.sleep(2.0)
         
         # Force garbage collection
         import gc
         gc.collect()
+        
+        print("Camera system reset complete")
+        
     except Exception as e:
         print(f"Camera system cleanup at startup failed (non-critical): {e}")
 

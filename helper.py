@@ -6,16 +6,45 @@ def fs_dither_rgb(img_array, threshold=128):
     h, w, c = img_array.shape
     for y in range(h):
         for x in range(w):
-            old = img_array[y, x].copy()
-            new = np.where(old < threshold, 0, 255)
-            err = old - new
-            img_array[y, x] = new
+            # Access pixel values directly without copying
+            old_r = img_array[y, x, 0]
+            old_g = img_array[y, x, 1]
+            old_b = img_array[y, x, 2]
+            
+            # Calculate new values
+            new_r = 0 if old_r < threshold else 255
+            new_g = 0 if old_g < threshold else 255
+            new_b = 0 if old_b < threshold else 255
+            
+            # Calculate errors
+            err_r = old_r - new_r
+            err_g = old_g - new_g
+            err_b = old_b - new_b
+            
+            # Set the new pixel values
+            img_array[y, x, 0] = new_r
+            img_array[y, x, 1] = new_g
+            img_array[y, x, 2] = new_b
+            
+            # Distribute errors to neighboring pixels
             if x+1 < w:
-                img_array[y, x+1] += err * 7/16
+                img_array[y, x+1, 0] += err_r * 7/16
+                img_array[y, x+1, 1] += err_g * 7/16
+                img_array[y, x+1, 2] += err_b * 7/16
             if y+1 < h:
-                if x > 0: img_array[y+1, x-1] += err * 3/16
-                img_array[y+1, x] += err * 5/16
-                if x+1 < w: img_array[y+1, x+1] += err * 1/16
+                if x > 0:
+                    img_array[y+1, x-1, 0] += err_r * 3/16
+                    img_array[y+1, x-1, 1] += err_g * 3/16
+                    img_array[y+1, x-1, 2] += err_b * 3/16
+                
+                img_array[y+1, x, 0] += err_r * 5/16
+                img_array[y+1, x, 1] += err_g * 5/16
+                img_array[y+1, x, 2] += err_b * 5/16
+                
+                if x+1 < w:
+                    img_array[y+1, x+1, 0] += err_r * 1/16
+                    img_array[y+1, x+1, 1] += err_g * 1/16
+                    img_array[y+1, x+1, 2] += err_b * 1/16
     return np.clip(img_array, 0, 255).astype(np.uint8)
 
 @njit
@@ -36,10 +65,13 @@ def fs_dither_greyscale(img_array, threshold=128):
     return np.clip(img_array, 0, 255).astype(np.uint8)
 
 def fs_dither(arr, type, threshold=128):
+    # Make a copy of the input array to avoid modifying the original
+    work_arr = arr.copy()
+    
     if type == 'RGB':
-        return fs_dither_rgb(arr, threshold)
+        return fs_dither_rgb(work_arr, threshold)
     else:  # type == 'L'
-        return fs_dither_greyscale(arr, threshold)
+        return fs_dither_greyscale(work_arr, threshold)
     
 @njit
 def simple_threshold_rgb_ps1(arr, threshold=128):
