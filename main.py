@@ -444,6 +444,7 @@ class CameraCaptureThread(QThread):
                         result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
                         # More efficient upscaling 
                         # For small images, use direct assignment which is faster for small arrays
+                        is_small = small_h * small_w < 10000  # Define is_small variable
                         if is_small:
                             result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
                             for y in range(orig_h):
@@ -475,11 +476,22 @@ class CameraCaptureThread(QThread):
                         
                         # More efficient upscaling with direct assignment for small images
                         result = np.zeros((orig_h, orig_w), dtype=np.uint8)
-                        for y in range(orig_h):
-                            y_small = min(y // pixel_s, small_h-1)
-                            for x in range(orig_w):
-                                x_small = min(x // pixel_s, small_w-1)
-                                result[y, x] = dithered_small[y_small, x_small]
+                        # Check if we're dealing with a small image
+                        is_small = small_h * small_w < 10000  # Define is_small variable
+                        if is_small:
+                            # Small image optimization - direct assignment
+                            for y in range(orig_h):
+                                y_small = min(y // pixel_s, small_h-1)
+                                for x in range(orig_w):
+                                    x_small = min(x // pixel_s, small_w-1)
+                                    result[y, x] = dithered_small[y_small, x_small]
+                        else:
+                            # For larger images, use the same approach
+                            for y in range(orig_h):
+                                y_small = min(y // pixel_s, small_h-1)
+                                for x in range(orig_w):
+                                    x_small = min(x // pixel_s, small_w-1)
+                                    result[y, x] = dithered_small[y_small, x_small]
             elif alg == "Simple Threshold":
                 if pixel_s == 1:
                     # Apply simple threshold directly
@@ -786,6 +798,7 @@ class FrameProcessingThread(QThread):
                         
                         # More efficient upscaling 
                         # For small images, use direct assignment which is faster for small arrays
+                        is_small = small_h * small_w < 10000  # Define is_small variable
                         if is_small:
                             result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
                             for y in range(orig_h):
@@ -817,11 +830,22 @@ class FrameProcessingThread(QThread):
                         
                         # More efficient upscaling with direct assignment for small images
                         result = np.zeros((orig_h, orig_w), dtype=np.uint8)
-                        for y in range(orig_h):
-                            y_small = min(y // pixel_s, small_h-1)
-                            for x in range(orig_w):
-                                x_small = min(x // pixel_s, small_w-1)
-                                result[y, x] = dithered_small[y_small, x_small]
+                        # Check if we're dealing with a small image
+                        is_small = small_h * small_w < 10000  # Define is_small variable
+                        if is_small:
+                            # Small image optimization - direct assignment
+                            for y in range(orig_h):
+                                y_small = min(y // pixel_s, small_h-1)
+                                for x in range(orig_w):
+                                    x_small = min(x // pixel_s, small_w-1)
+                                    result[y, x] = dithered_small[y_small, x_small]
+                        else:
+                            # For larger images, use the same approach
+                            for y in range(orig_h):
+                                y_small = min(y // pixel_s, small_h-1)
+                                for x in range(orig_w):
+                                    x_small = min(x // pixel_s, small_w-1)
+                                    result[y, x] = dithered_small[y_small, x_small]
             elif alg == "Simple Threshold":
                 if pixel_s == 1:
                     # Apply simple threshold directly
@@ -1415,7 +1439,7 @@ class DitherApp(QMainWindow):
             self.save_button.setEnabled(True)
         else:
             print("Warning: Received None image in update_camera_frame")
-            
+    
     def toggle_image_display(self):
         if not self.original_image or not self.dithered_image:
             return
@@ -1590,7 +1614,7 @@ class DitherApp(QMainWindow):
         # Apply dithering to static images if auto-render is on
         if self.auto_render.isChecked() and self.original_image is not None:
             self.apply_dither()
-            
+    
     def apply_dither(self):
         if not self.original_image:
             return
@@ -1689,8 +1713,8 @@ class DitherApp(QMainWindow):
                         print(f"Image saved with alternative method to {path}")
                     except Exception as e2:
                         print(f"Alternative save also failed: {e2}")
-            else:
-                print(f"Error: dithered_image does not have save method: {type(self.dithered_image)}")
+                else:
+                    print(f"Error: dithered_image does not have save method: {type(self.dithered_image)}")
         except Exception as e:
             print(f"Error in save_image: {e}")
             import traceback
