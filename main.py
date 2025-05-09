@@ -13,7 +13,7 @@ import numpy as np
 import os, config
 from helper import (fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither, 
                    block_average_rgb, block_average_gray, nearest_upscale_rgb, 
-                   nearest_upscale_gray, downscale_dither_upscale)
+                   nearest_upscale_gray, downscale_dither_upscale, bgr_to_rgb)
 
 # Try to import picamera only if available (for development on non-Pi platforms)
 try:
@@ -239,10 +239,16 @@ class CameraCaptureThread(QThread):
                         # Wait for camera to initialize
                         time.sleep(3.0)
                         
+                        # Add note about picamera2 color format
+                        print("Note: picamera2 typically outputs frames in BGR format, will be converted to RGB")
+                        
                         # Test by capturing one frame - if this succeeds, camera is working
                         test_frame = self.camera.capture_array()
                         if test_frame is not None:
-                            print(f"Test frame captured successfully: {test_frame.shape}")
+                            print(f"Test frame captured successfully: {test_frame.shape}, data type: {test_frame.dtype}")
+                            # Print the first few pixels to debug color format
+                            if len(test_frame.shape) == 3 and test_frame.shape[2] >= 3:
+                                print(f"First pixel RGB/BGR values: {test_frame[0,0,:]}")
                             self.camera_initialized = True
                             print("Camera initialized successfully")
                             break
@@ -315,6 +321,9 @@ class CameraCaptureThread(QThread):
                     if frame is not None and len(frame.shape) == 3:
                         if frame.shape[2] == 4:  # Convert RGBA to RGB if needed
                             frame = frame[:, :, :3]
+                            
+                        # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
+                        frame = bgr_to_rgb(frame)
                         
                         # Reuse buffer if possible
                         if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
@@ -571,6 +580,9 @@ class FrameProcessingThread(QThread):
                 # Make sure we have a proper RGB frame
                 if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
                     try:
+                        # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
+                        frame = bgr_to_rgb(frame)
+                        
                         # Check if pass-through mode is enabled
                         if self.app.pass_through_mode.isChecked():
                             # Skip all processing in pass-through mode

@@ -582,3 +582,9 @@ def downscale_dither_upscale(array, threshold, pixel_scale, mode='RGB'):
         return downscale_dither_upscale_rgb(array, threshold, pixel_scale)
     else:  # mode == 'L'
         return downscale_dither_upscale_gray(array, threshold, pixel_scale)
+
+@njit
+def bgr_to_rgb(array):
+    """Convert BGR color format to RGB format using Numba acceleration"""
+    # Simple color channel swap
+    return array[:, :, ::-1].copy()
