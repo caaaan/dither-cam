@@ -1,14 +1,133 @@
 import sys
+import threading
+import time
+import queue
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton, 
                              QLabel, QVBoxLayout, QHBoxLayout, QComboBox, 
                              QSlider, QFileDialog, QSplitter, QCheckBox,
                              QFrame, QScrollArea)
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QThread
 from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
 from PIL import Image, ImageEnhance
 import numpy as np
 import os, config
 from helper import fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither
+
+# Try to import picamera only if available (for development on non-Pi platforms)
+try:
+    import picamera
+    PICAMERA_AVAILABLE = True
+except ImportError:
+    PICAMERA_AVAILABLE = False
+    print("Warning: picamera module not available. Camera features will be disabled.")
+
+class CameraCaptureThread(QThread):
+    frameCaptured = pyqtSignal(np.ndarray)
+
+    def __init__(self, frame_queue):
+        super().__init__()
+        self.is_running = True
+        self.frame_queue = frame_queue
+        
+        if PICAMERA_AVAILABLE:
+            try:
+                self.camera = picamera.PiCamera()
+                self.camera.resolution = (640, 480)
+                self.camera_initialized = True
+                print("Camera initialized successfully")
+            except Exception as e:
+                print(f"Error initializing camera: {e}")
+                self.camera_initialized = False
+        else:
+            self.camera_initialized = False
+
+    def run(self):
+        if not self.camera_initialized:
+            print("Camera not initialized, capture thread exiting")
+            return
+            
+        try:
+            while self.is_running:
+                # Create a numpy array to store the image
+                frame = np.empty((480, 640, 3), dtype=np.uint8)
+                self.camera.capture(frame, 'rgb')
+                
+                # Add captured frame to the queue
+                if not self.frame_queue.full():
+                    self.frame_queue.put(frame)
+                else:
+                    # Skip this frame if queue is full
+                    pass
+                    
+                time.sleep(0.03)  # ~30 FPS
+        except Exception as e:
+            print(f"Error in camera capture thread: {e}")
+        finally:
+            if hasattr(self, 'camera'):
+                self.camera.close()
+
+    def stop(self):
+        self.is_running = False
+        if hasattr(self, 'camera') and self.camera_initialized:
+            self.camera.close()
+
+class FrameProcessingThread(QThread):
+    frameProcessed = pyqtSignal(Image.Image)
+
+    def __init__(self, frame_queue, app_instance):
+        super().__init__()
+        self.is_running = True
+        self.frame_queue = frame_queue
+        self.app = app_instance  # Reference to the main app for dithering settings
+
+    def run(self):
+        while self.is_running:
+            try:
+                if not self.frame_queue.empty():
+                    # Get frame from the queue
+                    frame = self.frame_queue.get()
+                    
+                    # Convert numpy array to PIL Image
+                    pil_img = Image.fromarray(frame)
+                    
+                    # Apply dithering using the main app's dithering functions
+                    dithered_img = self.process_frame(pil_img)
+                    
+                    # Emit processed frame
+                    self.frameProcessed.emit(dithered_img)
+                    
+                time.sleep(0.01)  # Small sleep to prevent CPU hogging
+            except Exception as e:
+                print(f"Error in processing thread: {e}")
+
+    def process_frame(self, pil_img):
+        # Get current settings from main app
+        alg = self.app.algorithm_combo.currentText()
+        thr = self.app.threshold_slider.value()
+        contrast_factor = self.app.contrast_slider.value() / 100.0
+        pixel_s = self.app.scale_slider.value()
+        
+        # Apply contrast if needed
+        if abs(contrast_factor - 1.0) > 0.01:
+            try:
+                enhancer = ImageEnhance.Contrast(pil_img)
+                image_to_dither = enhancer.enhance(contrast_factor)
+            except Exception as e:
+                print(f"Error applying contrast: {e}")
+                image_to_dither = pil_img
+        else:
+            image_to_dither = pil_img
+        
+        # Apply selected dithering algorithm
+        if alg == "Floyd-Steinberg":
+            return self.app.floyd_steinberg_numpy(image_to_dither, thr, pixel_s)
+        elif alg == "Simple Threshold":
+            return self.app.simple_threshold(image_to_dither, thr, pixel_s)
+        else:
+            return image_to_dither  # Fallback
+
+    def stop(self):
+        self.is_running = False
 
 class ImageViewer(QScrollArea):
     zoom_changed = pyqtSignal(float)
@@ -102,6 +221,12 @@ class DitherApp(QMainWindow):
         self.dithered_image = None
         self.showing_original = False # Show dithered version first by default
         
+        # Initialize camera mode as disabled by default
+        self.camera_mode_active = False
+        self.frame_queue = queue.Queue(maxsize=10)  # For camera frames
+        self.capture_thread = None
+        self.processing_thread = None
+        
         self.setup_ui()
         
     def setup_ui(self):
@@ -186,6 +311,27 @@ class DitherApp(QMainWindow):
         button_container = QWidget() # This container itself won't get the background image
         button_container.setLayout(button_layout)
         self.control_layout.addWidget(button_container, 0, Qt.AlignmentFlag.AlignCenter)
+        
+        # Camera buttons
+        camera_button_layout = QHBoxLayout()
+        self.camera_button = QPushButton("Start Camera")
+        self.camera_button.clicked.connect(self.toggle_camera_mode)
+        self.camera_button.setMinimumWidth(120)
+        
+        # Only enable camera button if picamera is available
+        self.camera_button.setEnabled(PICAMERA_AVAILABLE)
+        
+        camera_button_layout.addWidget(self.camera_button)
+        
+        self.capture_button = QPushButton("Capture Frame")
+        self.capture_button.clicked.connect(self.capture_frame)
+        self.capture_button.setMinimumWidth(120)
+        self.capture_button.setEnabled(False)  # Disabled until camera starts
+        camera_button_layout.addWidget(self.capture_button)
+        
+        camera_button_container = QWidget()
+        camera_button_container.setLayout(camera_button_layout)
+        self.control_layout.addWidget(camera_button_container, 0, Qt.AlignmentFlag.AlignCenter)
         
         # Add horizontal divider
         divider = QFrame()
@@ -310,6 +456,94 @@ class DitherApp(QMainWindow):
         # Connect ImageViewer zoom changes to update slider/label
         self.image_viewer.zoom_changed.connect(self.update_controls_from_zoom_factor)
     
+    def toggle_camera_mode(self):
+        if self.camera_mode_active:
+            self.stop_camera()
+        else:
+            self.start_camera()
+    
+    def start_camera(self):
+        if not PICAMERA_AVAILABLE:
+            print("Camera not available")
+            return
+            
+        # Create and start threads if they don't exist
+        if not self.capture_thread:
+            self.capture_thread = CameraCaptureThread(self.frame_queue)
+            
+        if not self.processing_thread:
+            self.processing_thread = FrameProcessingThread(self.frame_queue, self)
+            self.processing_thread.frameProcessed.connect(self.update_camera_frame)
+            
+        # Start threads if not already running
+        if not self.capture_thread.isRunning():
+            self.capture_thread.start()
+            
+        if not self.processing_thread.isRunning():
+            self.processing_thread.start()
+            
+        # Update UI
+        self.camera_button.setText("Stop Camera")
+        self.capture_button.setEnabled(True)
+        self.open_button.setEnabled(False)  # Disable file open during camera mode
+        self.camera_mode_active = True
+        
+        # Clear current image
+        self.showing_original = False
+        self.original_image = None
+        self.dithered_image = None
+        self.toggle_button.setEnabled(False)
+    
+    def stop_camera(self):
+        # Stop threads
+        if self.capture_thread and self.capture_thread.isRunning():
+            self.capture_thread.stop()
+            self.capture_thread.wait()  # Wait for thread to finish
+        
+        if self.processing_thread and self.processing_thread.isRunning():
+            self.processing_thread.stop()
+            self.processing_thread.wait()  # Wait for thread to finish
+            
+        # Update UI
+        self.camera_button.setText("Start Camera")
+        self.capture_button.setEnabled(False)
+        self.open_button.setEnabled(True)  # Re-enable file open
+        self.camera_mode_active = False
+        
+        # Clear image
+        self.image_viewer.set_image(None)
+    
+    def capture_frame(self):
+        """Capture current frame and save it as the original image"""
+        if not self.camera_mode_active or self.frame_queue.empty():
+            return
+            
+        try:
+            # Get the most recent frame from the queue
+            frame = None
+            while not self.frame_queue.empty():
+                frame = self.frame_queue.get()
+                
+            if frame is not None:
+                # Convert to PIL image and store
+                self.original_image = Image.fromarray(frame)
+                
+                # Stop camera and apply dithering
+                self.stop_camera()
+                self.apply_dither()
+                self.save_button.setEnabled(True)
+                
+        except Exception as e:
+            print(f"Error capturing frame: {e}")
+    
+    def update_camera_frame(self, dithered_img):
+        """Update the UI with the processed camera frame"""
+        if not self.camera_mode_active:
+            return
+            
+        # Display the dithered frame
+        self.display_image(dithered_img)
+        
     def toggle_image_display(self):
         if not self.original_image or not self.dithered_image:
             return
@@ -318,12 +552,16 @@ class DitherApp(QMainWindow):
         
         if self.showing_original:
             self.display_image(self.original_image)
-            self.toggle_button.setText("Switch to Original Image")
+            self.toggle_button.setText("Switch to Dithered Image")
         else:
             self.display_image(self.dithered_image)
             self.toggle_button.setText("Switch to Original Image")
     
     def open_image(self):
+        # Ensure camera is stopped first
+        if self.camera_mode_active:
+            self.stop_camera()
+            
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Image", "", "Image Files (*.png *.jpg *.jpeg)"
         )
@@ -347,13 +585,9 @@ class DitherApp(QMainWindow):
                 # Initial dithering failed, fall back to showing original
                 self.showing_original = True # Update state to reflect original is shown
                 self.display_image(self.original_image) # Explicitly display original
-                self.toggle_button.setText("Switch to Original Image")
+                self.toggle_button.setText("Switch to Dithered Image")
                 self.save_button.setEnabled(False)
                 self.toggle_button.setEnabled(False) # No dithered image to switch to
-
-            # The auto_render check here is no longer needed as we try to dither by default.
-            # if self.auto_render.isChecked():
-            #     self.apply_dither()
                 
         except Exception as e:
             print(f"Error opening image: {e}")
@@ -579,6 +813,24 @@ class DitherApp(QMainWindow):
         # Update splitter ratio when window is resized
         total_width = self.width()
         self.splitter.setSizes([int(total_width * 0.8), int(total_width * 0.2)])
+        
+    def closeEvent(self, event):
+        """Called when the application is closing, ensures threads are stopped"""
+        # Stop camera threads if active
+        if self.camera_mode_active:
+            self.stop_camera()
+            
+        # Just to be thorough, check if threads exist and make sure they're stopped
+        if self.capture_thread and self.capture_thread.isRunning():
+            self.capture_thread.stop()
+            self.capture_thread.wait(1000)  # Wait up to 1 second
+            
+        if self.processing_thread and self.processing_thread.isRunning():
+            self.processing_thread.stop()
+            self.processing_thread.wait(1000)  # Wait up to 1 second
+            
+        # Accept the event and close the application
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
