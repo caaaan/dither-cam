@@ -32,7 +32,12 @@ class CameraCaptureThread(QThread):
         if PICAMERA_AVAILABLE:
             try:
                 self.camera = Picamera2()
-                self.camera.resolution = (640, 480)
+                # Configure camera
+                config = self.camera.create_still_configuration(
+                    main={"size": (640, 480), "format": "RGB888"}
+                )
+                self.camera.configure(config)
+                self.camera.start()  # Start camera
                 self.camera_initialized = True
                 print("Camera initialized successfully")
             except Exception as e:
@@ -48,9 +53,12 @@ class CameraCaptureThread(QThread):
             
         try:
             while self.is_running:
-                # Create a numpy array to store the image
-                frame = np.empty((480, 640, 3), dtype=np.uint8)
-                self.camera.capture(frame, 'rgb')
+                # Capture frame directly as numpy array
+                frame = self.camera.capture_array()
+                
+                # Ensure the frame is in RGB format
+                if frame.shape[2] == 4:  # If RGBA format
+                    frame = frame[:, :, :3]  # Convert to RGB by removing alpha
                 
                 # Add captured frame to the queue
                 if not self.frame_queue.full():
@@ -63,13 +71,15 @@ class CameraCaptureThread(QThread):
         except Exception as e:
             print(f"Error in camera capture thread: {e}")
         finally:
-            if hasattr(self, 'camera'):
-                self.camera.close()
+            if hasattr(self, 'camera') and self.camera_initialized:
+                self.camera.stop()
+                print("Camera stopped")
 
     def stop(self):
         self.is_running = False
         if hasattr(self, 'camera') and self.camera_initialized:
-            self.camera.close()
+            self.camera.stop()
+            print("Camera stopped")
 
 class FrameProcessingThread(QThread):
     frameProcessed = pyqtSignal(Image.Image)

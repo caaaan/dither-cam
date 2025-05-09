@@ -1,4 +1,3 @@
-
 <div align="center">
   <p style="font-size: 2em; font-weight: bold; margin-bottom: 4; font-family: 'Courier New', monospace;">DitherCam</p>
  
@@ -17,7 +16,7 @@ This application extends the original Dither3000 desktop application with real-t
     * Adjust threshold, contrast, and pixel scale
     * Save the resulting dithered images
 *   **New Camera Features:**
-    * Connect to a Raspberry Pi camera module
+    * Connect to a Raspberry Pi camera module using the modern Picamera2 library
     * See real-time dithering effects applied to the camera feed
     * Capture still frames and apply dithering algorithms
     * Switch between camera mode and static image mode
@@ -26,22 +25,26 @@ This application extends the original Dither3000 desktop application with real-t
 ## Hardware Requirements
 
 * Raspberry Pi (tested on Raspberry Pi 4, but should work on Pi 3 and newer)
-* Raspberry Pi Camera Module
+* Raspberry Pi Camera Module (v1, v2, or HQ Camera)
 * Display for Raspberry Pi
 
 ## Software Dependencies
 
 * Python 3.6+
 * PyQt6 (for the GUI)
-* picamera (for Raspberry Pi camera access)
+* Picamera2 (the new Raspberry Pi camera library)
 * PIL/Pillow (for image processing)
 * NumPy (for faster array processing)
 
 ## Setup for Raspberry Pi
 
 1. **Set up your Raspberry Pi with Raspberry Pi OS:**
-   * Install the latest Raspberry Pi OS
-   * Enable the camera module in `raspi-config`
+   * Install the latest Raspberry Pi OS (Bullseye or newer recommended for Picamera2)
+   * Enable the camera module in `raspi-config`:
+     ```
+     sudo raspi-config
+     ```
+     Navigate to "Interface Options" > "Camera" and enable it
 
 2. **Clone the repository:**
    ```bash
@@ -50,8 +53,16 @@ This application extends the original Dither3000 desktop application with real-t
    ```
 
 3. **Install dependencies:**
+   
+   Picamera2 is pre-installed on recent Raspberry Pi OS images (Bullseye and newer). If you need to install it manually:
    ```bash
-   pip install PyQt6 picamera pillow numpy
+   sudo apt update
+   sudo apt install -y python3-picamera2
+   ```
+
+   Install other dependencies:
+   ```bash
+   pip install PyQt6 pillow numpy
    ```
 
 4. **Run the application:**
@@ -78,10 +89,21 @@ This application extends the original Dither3000 desktop application with real-t
 
 The application uses a three-thread architecture:
 1. **Main UI Thread**: Handles the user interface and user interactions
-2. **Camera Capture Thread**: Continuously captures frames from the camera
+2. **Camera Capture Thread**: Continuously captures frames from the camera using Picamera2
 3. **Frame Processing Thread**: Applies dithering algorithms to the captured frames
 
 This multi-threaded design ensures smooth performance by separating the camera I/O, image processing, and UI rendering tasks.
+
+## Note on Picamera2 vs. Legacy Picamera
+
+This application uses the new Picamera2 library, which is the successor to the original picamera library. Picamera2 offers several advantages:
+
+* Better performance and more options for camera control
+* Support for newer Raspberry Pi models and camera modules
+* Improved integration with the Raspberry Pi's camera stack
+* Active development and maintenance
+
+Picamera2 has a different API compared to the original picamera, so this code is not compatible with the legacy library.
 
 ## Building the Application
 
@@ -117,8 +139,6 @@ Future development may include:
 ## Example Screenshot
 
 ![Example Screenshot](example.png)
-
-
 
 ## Building the Application
 
