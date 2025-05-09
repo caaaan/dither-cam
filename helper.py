@@ -392,3 +392,193 @@ def nearest_upscale_gray(small_arr, out_array, orig_h, orig_w, small_h, small_w,
             x_small = min(x // pixel_s, small_w-1)
             out_array[y, x] = small_arr[y_small, x_small]
     return out_array
+
+@njit
+def downscale_dither_upscale_rgb(array, threshold, pixel_scale):
+    """Complete pipeline for downscale-dither-upscale for RGB images with JIT optimization"""
+    # Get dimensions
+    orig_h, orig_w, _ = array.shape
+    small_h = max(1, orig_h // pixel_scale)
+    small_w = max(1, orig_w // pixel_scale)
+    
+    # Step 1: Downscale using block averaging
+    small_arr = np.zeros((small_h, small_w, 3), dtype=np.float32)
+    
+    # Optimized block averaging
+    for y in range(small_h):
+        y_start = y * pixel_scale
+        y_end = min((y+1) * pixel_scale, orig_h)
+        for x in range(small_w):
+            x_start = x * pixel_scale
+            x_end = min((x+1) * pixel_scale, orig_w)
+            
+            # For each channel, average the block
+            r_sum, g_sum, b_sum, count = 0.0, 0.0, 0.0, 0
+            for yy in range(y_start, y_end):
+                for xx in range(x_start, x_end):
+                    r_sum += array[yy, xx, 0]
+                    g_sum += array[yy, xx, 1]
+                    b_sum += array[yy, xx, 2]
+                    count += 1
+                    
+            if count > 0:
+                small_arr[y, x, 0] = r_sum / count
+                small_arr[y, x, 1] = g_sum / count
+                small_arr[y, x, 2] = b_sum / count
+    
+    # Step 2: Apply dithering on smaller array
+    # We'll use an optimized version of fs_dither_rgb directly
+    error_r = np.zeros((small_h, small_w+2), dtype=np.float32)
+    error_g = np.zeros((small_h, small_w+2), dtype=np.float32)
+    error_b = np.zeros((small_h, small_w+2), dtype=np.float32)
+    
+    # Copy small array values to error buffers
+    for y in range(small_h):
+        for x in range(small_w):
+            error_r[y, x+1] = small_arr[y, x, 0]
+            error_g[y, x+1] = small_arr[y, x, 1]
+            error_b[y, x+1] = small_arr[y, x, 2]
+    
+    # Dither the small array
+    for y in range(small_h):
+        for x in range(small_w):
+            # Get current values from error buffers
+            old_r = error_r[y, x+1]
+            old_g = error_g[y, x+1]
+            old_b = error_b[y, x+1]
+            
+            # Apply threshold to get binary values
+            new_r = 0.0 if old_r < threshold else 255.0
+            new_g = 0.0 if old_g < threshold else 255.0
+            new_b = 0.0 if old_b < threshold else 255.0
+            
+            # Store results in small array
+            small_arr[y, x, 0] = new_r
+            small_arr[y, x, 1] = new_g
+            small_arr[y, x, 2] = new_b
+            
+            # Calculate error
+            err_r = old_r - new_r
+            err_g = old_g - new_g
+            err_b = old_b - new_b
+            
+            # Distribute error to neighboring pixels
+            error_r[y, x+2] += err_r * 7/16        # right
+            error_g[y, x+2] += err_g * 7/16
+            error_b[y, x+2] += err_b * 7/16
+            
+            if y+1 < small_h:
+                error_r[y+1, x] += err_r * 3/16    # bottom left
+                error_g[y+1, x] += err_g * 3/16
+                error_b[y+1, x] += err_b * 3/16
+                
+                error_r[y+1, x+1] += err_r * 5/16  # bottom
+                error_g[y+1, x+1] += err_g * 5/16
+                error_b[y+1, x+1] += err_b * 5/16
+                
+                error_r[y+1, x+2] += err_r * 1/16  # bottom right
+                error_g[y+1, x+2] += err_g * 1/16
+                error_b[y+1, x+2] += err_b * 1/16
+    
+    # Step 3: Upscale using nearest neighbor
+    result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+    
+    # Optimization: Use a faster algorithm for small images
+    if small_h * small_w < 10000:
+        for y in range(orig_h):
+            y_small = min(y // pixel_scale, small_h-1)
+            for x in range(orig_w):
+                x_small = min(x // pixel_scale, small_w-1)
+                result[y, x, 0] = small_arr[y_small, x_small, 0]
+                result[y, x, 1] = small_arr[y_small, x_small, 1]
+                result[y, x, 2] = small_arr[y_small, x_small, 2]
+    else:
+        # For larger images, we can use the same approach
+        for y in range(orig_h):
+            y_small = min(y // pixel_scale, small_h-1)
+            for x in range(orig_w):
+                x_small = min(x // pixel_scale, small_w-1)
+                result[y, x, 0] = small_arr[y_small, x_small, 0]
+                result[y, x, 1] = small_arr[y_small, x_small, 1]
+                result[y, x, 2] = small_arr[y_small, x_small, 2]
+    
+    return result
+
+@njit
+def downscale_dither_upscale_gray(array, threshold, pixel_scale):
+    """Complete pipeline for downscale-dither-upscale for grayscale images with JIT optimization"""
+    # Get dimensions
+    orig_h, orig_w = array.shape
+    small_h = max(1, orig_h // pixel_scale)
+    small_w = max(1, orig_w // pixel_scale)
+    
+    # Step 1: Downscale using block averaging
+    small_arr = np.zeros((small_h, small_w), dtype=np.float32)
+    
+    # Optimized block averaging
+    for y in range(small_h):
+        y_start = y * pixel_scale
+        y_end = min((y+1) * pixel_scale, orig_h)
+        for x in range(small_w):
+            x_start = x * pixel_scale
+            x_end = min((x+1) * pixel_scale, orig_w)
+            
+            # Average the block
+            val_sum, count = 0.0, 0
+            for yy in range(y_start, y_end):
+                for xx in range(x_start, x_end):
+                    val_sum += array[yy, xx]
+                    count += 1
+                    
+            if count > 0:
+                small_arr[y, x] = val_sum / count
+    
+    # Step 2: Apply dithering on smaller array
+    # We'll use an optimized version of fs_dither_greyscale directly
+    error_buffer = np.zeros((small_h, small_w+2), dtype=np.float32)
+    
+    # Copy small array values to error buffer
+    for y in range(small_h):
+        for x in range(small_w):
+            error_buffer[y, x+1] = small_arr[y, x]
+    
+    # Dither the small array
+    for y in range(small_h):
+        for x in range(small_w):
+            # Get current value from error buffer
+            old_val = error_buffer[y, x+1]
+            
+            # Apply threshold to get binary value
+            new_val = 0.0 if old_val < threshold else 255.0
+            
+            # Store result in small array
+            small_arr[y, x] = new_val
+            
+            # Calculate error
+            error = old_val - new_val
+            
+            # Distribute error to neighboring pixels
+            error_buffer[y, x+2] += error * 7/16        # right
+            if y+1 < small_h:
+                error_buffer[y+1, x] += error * 3/16    # bottom left
+                error_buffer[y+1, x+1] += error * 5/16  # bottom
+                error_buffer[y+1, x+2] += error * 1/16  # bottom right
+    
+    # Step 3: Upscale using nearest neighbor
+    result = np.zeros((orig_h, orig_w), dtype=np.uint8)
+    
+    # Upscale using direct assignment
+    for y in range(orig_h):
+        y_small = min(y // pixel_scale, small_h-1)
+        for x in range(orig_w):
+            x_small = min(x // pixel_scale, small_w-1)
+            result[y, x] = small_arr[y_small, x_small]
+    
+    return result
+
+def downscale_dither_upscale(array, threshold, pixel_scale, mode='RGB'):
+    """Unified function for the complete downscale-dither-upscale pipeline with mode selection"""
+    if mode == 'RGB':
+        return downscale_dither_upscale_rgb(array, threshold, pixel_scale)
+    else:  # mode == 'L'
+        return downscale_dither_upscale_gray(array, threshold, pixel_scale)

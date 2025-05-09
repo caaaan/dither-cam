@@ -13,7 +13,7 @@ import numpy as np
 import os, config
 from helper import (fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither, 
                    block_average_rgb, block_average_gray, nearest_upscale_rgb, 
-                   nearest_upscale_gray)
+                   nearest_upscale_gray, downscale_dither_upscale)
 
 # Try to import picamera only if available (for development on non-Pi platforms)
 try:
@@ -394,8 +394,21 @@ class CameraCaptureThread(QThread):
             contrast_factor = self.app.contrast_slider.value() / 100.0
             pixel_s = self.app.scale_slider.value()
             
-            # Simple direct copy
-            array_to_dither = array.copy()
+            # Check if we have a small image
+            is_small = array.size < 150000  # Adjust based on your threshold
+            
+            # Optimize copy operations for small images
+            if is_small:
+                # For small images, direct copy is faster than empty_like + copyto
+                array_to_dither = array.copy()
+            else:
+                # For larger images, use the existing optimized approach
+                if mode == 'RGB':
+                    array_to_dither = np.empty_like(array)
+                    np.copyto(array_to_dither, array)
+                else:
+                    array_to_dither = np.empty_like(array)
+                    np.copyto(array_to_dither, array)
             
             # Apply contrast if needed
             if abs(contrast_factor - 1.0) > 0.01:
@@ -417,81 +430,17 @@ class CameraCaptureThread(QThread):
                     print(f"Error applying contrast: {e}")
                     # Continue with original array
             
-            # Apply dithering algorithm 
+            # Apply selected dithering algorithm directly on NumPy array
             if alg == "Floyd-Steinberg":
                 if pixel_s == 1:
-                    # Direct dithering
+                    # Apply dithering directly
                     if mode == 'RGB':
-                        return fs_dither(array_to_dither.astype(np.float32), 'RGB', thr)
+                        result = fs_dither(array_to_dither.astype(np.float32), 'RGB', thr)
                     else:
-                        return fs_dither(array_to_dither.astype(np.float32), 'L', thr)
+                        result = fs_dither(array_to_dither.astype(np.float32), 'L', thr)
                 else:
-                    # Downscale-dither-upscale approach
-                    orig_h, orig_w = array_to_dither.shape[:2]
-                    small_h = max(1, orig_h // pixel_s)
-                    small_w = max(1, orig_w // pixel_s)
-                    
-                    # Create downscaled array using block averaging
-                    if mode == 'RGB':
-                        small_arr = np.zeros((small_h, small_w, 3), dtype=np.float32)
-                        # Use helper function from helper.py for block averaging
-                        small_arr = block_average_rgb(array_to_dither, small_arr, small_h, small_w, pixel_s)
-                        
-                        # Apply dithering to small array
-                        dithered_small = fs_dither(small_arr, 'RGB', thr)
-                        
-                        # Upscale using nearest neighbor
-                        result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-                        # More efficient upscaling 
-                        # For small images, use direct assignment which is faster for small arrays
-                        is_small = small_h * small_w < 10000  # Define is_small variable
-                        if is_small:
-                            result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-                            for y in range(orig_h):
-                                y_small = min(y // pixel_s, small_h-1)
-                                for x in range(orig_w):
-                                    x_small = min(x // pixel_s, small_w-1)
-                                    result[y, x, :] = dithered_small[y_small, x_small, :]
-                        else:
-                            # For larger images use vectorized approach
-                            result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-                            for y in range(orig_h):
-                                y_small = min(y // pixel_s, small_h-1)
-                                for x in range(orig_w):
-                                    x_small = min(x // pixel_s, small_w-1)
-                                    result[y, x, :] = dithered_small[y_small, x_small, :]
-                    else:
-                        # More efficient block averaging for grayscale
-                        small_arr = np.zeros((small_h, small_w), dtype=np.float32)
-                        for y in range(small_h):
-                            y_start = y * pixel_s
-                            y_end = min((y+1) * pixel_s, orig_h)
-                            for x in range(small_w):
-                                x_start = x * pixel_s
-                                x_end = min((x+1) * pixel_s, orig_w)
-                                small_arr[y, x] = np.mean(array_to_dither[y_start:y_end, x_start:x_end])
-                        
-                        # Apply dithering to small array
-                        dithered_small = fs_dither(small_arr, 'L', thr)
-                        
-                        # More efficient upscaling with direct assignment for small images
-                        result = np.zeros((orig_h, orig_w), dtype=np.uint8)
-                        # Check if we're dealing with a small image
-                        is_small = small_h * small_w < 10000  # Define is_small variable
-                        if is_small:
-                            # Small image optimization - direct assignment
-                            for y in range(orig_h):
-                                y_small = min(y // pixel_s, small_h-1)
-                                for x in range(orig_w):
-                                    x_small = min(x // pixel_s, small_w-1)
-                                    result[y, x] = dithered_small[y_small, x_small]
-                        else:
-                            # For larger images, use the same approach
-                            for y in range(orig_h):
-                                y_small = min(y // pixel_s, small_h-1)
-                                for x in range(orig_w):
-                                    x_small = min(x // pixel_s, small_w-1)
-                                    result[y, x] = dithered_small[y_small, x_small]
+                    # Use the optimized downscale-dither-upscale pipeline
+                    result = downscale_dither_upscale(array_to_dither, thr, pixel_s, mode)
             elif alg == "Simple Threshold":
                 if pixel_s == 1:
                     # Apply simple threshold directly
@@ -776,76 +725,8 @@ class FrameProcessingThread(QThread):
                     else:
                         result = fs_dither(array_to_dither.astype(np.float32), 'L', thr)
                 else:
-                    # For larger pixel scales, use downscale-dither-upscale approach
-                    # First create a smaller array by averaging blocks
-                    orig_h, orig_w = array_to_dither.shape[:2]
-                    small_h = max(1, orig_h // pixel_s)
-                    small_w = max(1, orig_w // pixel_s)
-                    
-                    if mode == 'RGB':
-                        # More efficient block averaging for RGB
-                        small_arr = np.zeros((small_h, small_w, 3), dtype=np.float32)
-                        for y in range(small_h):
-                            y_start = y * pixel_s
-                            y_end = min((y+1) * pixel_s, orig_h)
-                            for x in range(small_w):
-                                x_start = x * pixel_s
-                                x_end = min((x+1) * pixel_s, orig_w)
-                                small_arr[y, x, :] = np.mean(array_to_dither[y_start:y_end, x_start:x_end, :], axis=(0, 1))
-                        
-                        # Apply dithering to small array
-                        dithered_small = fs_dither(small_arr, 'RGB', thr)
-                        
-                        # More efficient upscaling 
-                        # For small images, use direct assignment which is faster for small arrays
-                        is_small = small_h * small_w < 10000  # Define is_small variable
-                        if is_small:
-                            result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-                            for y in range(orig_h):
-                                y_small = min(y // pixel_s, small_h-1)
-                                for x in range(orig_w):
-                                    x_small = min(x // pixel_s, small_w-1)
-                                    result[y, x, :] = dithered_small[y_small, x_small, :]
-                        else:
-                            # For larger images use vectorized approach
-                            result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-                            for y in range(orig_h):
-                                y_small = min(y // pixel_s, small_h-1)
-                                for x in range(orig_w):
-                                    x_small = min(x // pixel_s, small_w-1)
-                                    result[y, x, :] = dithered_small[y_small, x_small, :]
-                    else:
-                        # More efficient block averaging for grayscale
-                        small_arr = np.zeros((small_h, small_w), dtype=np.float32)
-                        for y in range(small_h):
-                            y_start = y * pixel_s
-                            y_end = min((y+1) * pixel_s, orig_h)
-                            for x in range(small_w):
-                                x_start = x * pixel_s
-                                x_end = min((x+1) * pixel_s, orig_w)
-                                small_arr[y, x] = np.mean(array_to_dither[y_start:y_end, x_start:x_end])
-                        
-                        # Apply dithering to small array
-                        dithered_small = fs_dither(small_arr, 'L', thr)
-                        
-                        # More efficient upscaling with direct assignment for small images
-                        result = np.zeros((orig_h, orig_w), dtype=np.uint8)
-                        # Check if we're dealing with a small image
-                        is_small = small_h * small_w < 10000  # Define is_small variable
-                        if is_small:
-                            # Small image optimization - direct assignment
-                            for y in range(orig_h):
-                                y_small = min(y // pixel_s, small_h-1)
-                                for x in range(orig_w):
-                                    x_small = min(x // pixel_s, small_w-1)
-                                    result[y, x] = dithered_small[y_small, x_small]
-                        else:
-                            # For larger images, use the same approach
-                            for y in range(orig_h):
-                                y_small = min(y // pixel_s, small_h-1)
-                                for x in range(orig_w):
-                                    x_small = min(x // pixel_s, small_w-1)
-                                    result[y, x] = dithered_small[y_small, x_small]
+                    # Use the optimized downscale-dither-upscale pipeline
+                    result = downscale_dither_upscale(array_to_dither, thr, pixel_s, mode)
             elif alg == "Simple Threshold":
                 if pixel_s == 1:
                     # Apply simple threshold directly
@@ -1725,37 +1606,28 @@ class DitherApp(QMainWindow):
             pixel_scale = 1
         
         if self.rgb_mode.isChecked():
-            type = 'RGB'
+            mode = 'RGB'
         else:
-            type = 'L'
+            mode = 'L'
         
         if pixel_scale == 1:
             # Convert PIL to numpy array once
-            arr = np.array(pil_img.convert(type), dtype=np.float32)
-            print("type", type)
+            arr = np.array(pil_img.convert(mode), dtype=np.float32)
             # Process the array directly
-            arr = fs_dither(arr, type, threshold)    
+            arr = fs_dither(arr, mode, threshold)    
             
             # Only convert back to PIL at the end
             return Image.fromarray(arr)
         else:
-            orig_w, orig_h = pil_img.size
-            small_w = max(1, orig_w // pixel_scale)
-            small_h = max(1, orig_h // pixel_scale)
+            # Use the optimized downscale-dither-upscale pipeline
+            # Convert PIL to numpy array
+            arr = np.array(pil_img.convert(mode))
             
-            print(f"Downscaling to {small_w}x{small_h}")
-            small_img = pil_img.resize((small_w, small_h), Image.Resampling.BOX)
+            # Process using the optimized function
+            result_arr = downscale_dither_upscale(arr, threshold, pixel_scale, mode)
             
-            # Convert to numpy and process
-            small_arr = np.array(small_img.convert(type), dtype=np.float32)
-            dithered_arr = fs_dither(small_arr, type, threshold)
-            
-            # Create PIL Image from array
-            dithered_small_img = Image.fromarray(dithered_arr)
-            
-            print(f"Upscaling back to {orig_w}x{orig_h}")
-            dithered_large_img = dithered_small_img.resize((orig_w, orig_h), Image.Resampling.NEAREST)
-            return dithered_large_img
+            # Convert the result back to PIL image
+            return Image.fromarray(result_arr)
     
     def simple_threshold(self, pil_img, threshold=128, pixel_scale=1):
         if pixel_scale <= 0:
