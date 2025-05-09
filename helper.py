@@ -1,5 +1,6 @@
 from numba import njit, prange
 import numpy as np
+from PIL import Image
 
 @njit
 def fs_dither_rgb(img_array, threshold=128):
@@ -588,3 +589,49 @@ def bgr_to_rgb(array):
     """Convert BGR color format to RGB format using Numba acceleration"""
     # Simple color channel swap
     return array[:, :, ::-1].copy()
+
+@njit
+def optimized_pass_through(array, out_buffer=None):
+    """
+    Optimized function for pass-through mode that minimizes memory operations.
+    This function only performs necessary color corrections while avoiding unnecessary memory allocations.
+    
+    Parameters:
+    array: Input array to process
+    out_buffer: Optional pre-allocated output buffer to reuse for better performance
+    
+    Returns:
+    Processed array (either in out_buffer or a new array)
+    """
+    if out_buffer is not None and out_buffer.shape == array.shape:
+        # Reuse existing buffer for better performance
+        for y in range(array.shape[0]):
+            for x in range(array.shape[1]):
+                for c in range(array.shape[2]):
+                    out_buffer[y, x, c] = array[y, x, c]
+        return out_buffer
+    else:
+        # Just make a clean copy if no buffer available
+        return array.copy()
+
+def bgr_array_to_pil(bgr_array):
+    """
+    Create a PIL Image directly from BGR array data without converting the entire array.
+    This is more efficient than converting BGR->RGB->PIL when we just need to display the image.
+    """
+    # Create a PIL image with channels in reversed order
+    # BGR array -> PIL Image with RGB format (reversed channels)
+    height, width, _ = bgr_array.shape
+    
+    # Create the RGB image by reordering the channels during PIL image creation
+    # This avoids creating an entirely new array
+    # PIL expects RGB format, so we swap the channel order
+    pil_img = Image.frombytes(
+        'RGB', 
+        (width, height), 
+        bgr_array.tobytes(), 
+        'raw', 
+        'BGR'  # Tell PIL these bytes are in BGR order
+    )
+    
+    return pil_img

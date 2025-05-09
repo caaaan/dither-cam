@@ -13,7 +13,8 @@ import numpy as np
 import os, config
 from helper import (fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither, 
                    block_average_rgb, block_average_gray, nearest_upscale_rgb, 
-                   nearest_upscale_gray, downscale_dither_upscale, bgr_to_rgb)
+                   nearest_upscale_gray, downscale_dither_upscale, bgr_to_rgb, 
+                   optimized_pass_through, bgr_array_to_pil)
 
 # Try to import picamera only if available (for development on non-Pi platforms)
 try:
@@ -37,6 +38,7 @@ class CameraCaptureThread(QThread):
         # Add buffer reuse to reduce memory allocation
         self.frame_buffer = None  # Will be initialized on first frame capture
         self.gray_buffer = None   # For grayscale conversions
+        self.passthrough_buffer = None  # Buffer for pass-through mode
         
         # Simple timing control
         self.last_capture_time = 0
@@ -113,6 +115,7 @@ class CameraCaptureThread(QThread):
                 # Clear old buffers to force recreation with new size
                 self.frame_buffer = None
                 self.gray_buffer = None
+                self.passthrough_buffer = None
                 
                 return True
                 
@@ -321,19 +324,31 @@ class CameraCaptureThread(QThread):
                     if frame is not None and len(frame.shape) == 3:
                         if frame.shape[2] == 4:  # Convert RGBA to RGB if needed
                             frame = frame[:, :, :3]
-                            
-                        # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
-                        frame = bgr_to_rgb(frame)
                         
-                        # Reuse buffer if possible
-                        if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
-                            self.frame_buffer = np.empty_like(frame)
-                        np.copyto(self.frame_buffer, frame)
+                        # For non-pass-through mode, convert BGR to RGB as before 
+                        if not self.app.pass_through_mode.isChecked():
+                            # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
+                            frame = bgr_to_rgb(frame)
+                            
+                            # Reuse buffer if possible
+                            if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
+                                self.frame_buffer = np.empty_like(frame)
+                            np.copyto(self.frame_buffer, frame)
                         
                         # Process based on mode
                         if self.app.pass_through_mode.isChecked():
-                            # Pass-through mode - skip all processing
-                            pil_result = Image.fromarray(frame)
+                            # For pass-through mode, use the efficient BGR-to-PIL conversion
+                            # Measure pass-through processing time
+                            pt_start = time.time()
+                            
+                            # Efficient creation of PIL image from BGR data without full conversion
+                            pil_result = bgr_array_to_pil(frame)
+                            
+                            # Report pass-through processing time
+                            pt_time = (time.time() - pt_start) * 1000  # Convert to ms
+                            if frames_captured % 30 == 0:  # Only log occasionally to avoid overwhelming output
+                                print(f"Pass-through processing time: {pt_time:.3f}ms")
+                            
                             self.frameProcessed.emit(pil_result)
                         elif self.app.rgb_mode.isChecked():
                             # RGB mode
@@ -538,6 +553,7 @@ class FrameProcessingThread(QThread):
         self.result_buffer = None
         self.rgb_buffer = None
         self.gray_buffer = None
+        self.passthrough_buffer = None  # Buffer for pass-through mode
         
         # Thread synchronization - detect if we're falling behind
         self.processed_count = 0
@@ -580,13 +596,15 @@ class FrameProcessingThread(QThread):
                 # Make sure we have a proper RGB frame
                 if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
                     try:
-                        # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
-                        frame = bgr_to_rgb(frame)
+                        # For non-pass-through mode, convert BGR to RGB as before
+                        if not self.app.pass_through_mode.isChecked():
+                            # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
+                            frame = bgr_to_rgb(frame)
                         
                         # Check if pass-through mode is enabled
                         if self.app.pass_through_mode.isChecked():
-                            # Skip all processing in pass-through mode
-                            pil_result = Image.fromarray(frame)
+                            # Efficient creation of PIL image from BGR data without full conversion
+                            pil_result = bgr_array_to_pil(frame)
                             
                             # Emit processed frame - only if we're still running
                             if self.is_running:
@@ -1424,7 +1442,7 @@ class DitherApp(QMainWindow):
             self.toggle_button.setEnabled(False)
             self.showing_original = False # Reset for next attempt
     
-    def display_image(self, pil_image):
+    def display_image(self, pil_image, is_bgr_data=False):
         if not pil_image:
             self.image_viewer.set_image(None) # set_image(None) handles zoom reset
             return
