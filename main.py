@@ -11,7 +11,9 @@ from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
 from PIL import Image, ImageEnhance
 import numpy as np
 import os, config
-from helper import fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither
+from helper import (fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither, 
+                   block_average_rgb, block_average_gray, nearest_upscale_rgb, 
+                   nearest_upscale_gray)
 
 # Try to import picamera only if available (for development on non-Pi platforms)
 try:
@@ -36,15 +38,13 @@ class CameraCaptureThread(QThread):
         self.frame_buffer = None  # Will be initialized on first frame capture
         self.gray_buffer = None   # For grayscale conversions
         
-        # Timing control for better thread synchronization
+        # Simple timing control
         self.last_capture_time = 0
         self.min_capture_interval = 0.033  # ~30fps maximum (33ms)
         
         # Performance tracking
         self.frames_processed = 0
         self.last_report_time = time.time()
-        self.avg_process_time = 0.033  # Initial guess at processing time
-        self.cpu_usage_history = []
         
         # Resolution control
         self.current_pixel_scale = 1
@@ -54,9 +54,13 @@ class CameraCaptureThread(QThread):
         # Dynamic frame skipping for CPU load management
         self.frames_to_skip = 0
         self.skip_counter = 0
-        self.target_cpu_percent = 25  # Target CPU usage percentage
+        self.target_cpu_percent = 45  # Target CPU usage percentage
         self.last_cpu_check = time.time()
         self.cpu_check_interval = 1.0  # Check CPU usage every second
+        
+        # Size-based optimization
+        self.is_small_resolution = False  # Will be set based on frame size
+        self.small_frame_skip_factor = 1.5  # Skip more frames for small resolutions
         
     def reconfigure_resolution(self, pixel_scale):
         """Dynamically reconfigure the camera resolution based on pixel scale"""
@@ -149,18 +153,34 @@ class CameraCaptureThread(QThread):
         # Calculate average CPU usage
         avg_cpu = sum(self.cpu_usage_history) / len(self.cpu_usage_history)
         
+        # Check if we're dealing with a small resolution
+        if hasattr(self, 'frame_buffer') and self.frame_buffer is not None:
+            height, width = self.frame_buffer.shape[:2]
+            self.is_small_resolution = (height * width < 150000)  # Approx 400x400 or smaller
+        
+        # Base skip adjustment
+        skip_adjustment = 0
+        
         # Adjust frames to skip based on CPU usage
         if avg_cpu > self.target_cpu_percent + 5:  # CPU usage too high
-            self.frames_to_skip = min(10, self.frames_to_skip + 1)  # Increase skip, max 10
+            skip_adjustment = 1  # Increase skip
         elif avg_cpu < self.target_cpu_percent - 5 and self.frames_to_skip > 0:  # CPU usage too low
-            self.frames_to_skip = max(0, self.frames_to_skip - 1)  # Decrease skip, min 0
+            skip_adjustment = -1  # Decrease skip
+            
+        # Apply skip adjustment with a factor for small resolutions
+        if self.is_small_resolution and skip_adjustment > 0:
+            # More aggressive skipping for small resolutions
+            skip_adjustment = int(skip_adjustment * self.small_frame_skip_factor)
+            
+        # Apply the adjustment
+        self.frames_to_skip = max(0, min(15, self.frames_to_skip + skip_adjustment))
             
         # If process time is very low, don't skip frames
-        if self.avg_process_time < 0.01:  # Less than 10ms
+        if self.avg_process_time < 0.01 and not self.is_small_resolution:  # Less than 10ms
             self.frames_to_skip = 0
             
         if self.frames_to_skip > 0 and len(self.cpu_usage_history) >= 3:
-            print(f"CPU: {avg_cpu:.1f}%, skipping {self.frames_to_skip} frames, process time: {self.avg_process_time*1000:.1f}ms")
+            print(f"CPU: {avg_cpu:.1f}%, skipping {self.frames_to_skip} frames, process time: {self.avg_process_time*1000:.1f}ms, small res: {self.is_small_resolution}")
         
     def run(self):
         print("Camera thread starting...")
@@ -263,97 +283,79 @@ class CameraCaptureThread(QThread):
                     print("Camera not properly initialized, stopping thread")
                     break
                 
-                # Thread synchronization: Control capture rate
+                # Simple rate control - limit capture rate to avoid overloading CPU
                 current_time = time.time()
                 time_since_last_capture = current_time - self.last_capture_time
                 
-                # Limit capture rate to avoid overloading the processing
                 if time_since_last_capture < self.min_capture_interval:
-                    # Sleep precisely the required amount to maintain timing
+                    # Sleep only if we need to wait a meaningful amount
                     sleep_time = self.min_capture_interval - time_since_last_capture
-                    if sleep_time > 0.001:  # Only sleep for meaningful intervals
+                    if sleep_time > 0.001:
                         time.sleep(sleep_time)
                     continue
-                
-                # Apply dynamic frame skipping to reduce CPU load
-                self.update_dynamic_frame_skip()
-                if self.frames_to_skip > 0:
-                    self.skip_counter += 1
-                    if self.skip_counter < self.frames_to_skip:
-                        # Skip this frame, just update the time
-                        self.last_capture_time = time.time()
-                        continue
-                    else:
-                        # Process this frame and reset counter
-                        self.skip_counter = 0
                 
                 # Measure frame processing time
                 process_start = time.time()
                 
                 try:
-                    # Check if we should still be running before capturing
+                    # Check if we should still be running
                     if not self.is_running:
                         break
                         
-                    # Use lock when accessing camera 
+                    # Capture frame with minimal lock time
                     with self.camera_lock:
                         if self.camera is None:
                             print("Camera object is None, exiting capture loop")
                             break
-                            
-                        # Capture frame directly as numpy array
                         frame = self.camera.capture_array()
                     
                     frames_captured += 1
                     
-                    # Process frame if it's valid
+                    # Process valid frames
                     if frame is not None and len(frame.shape) == 3:
-                        if frame.shape[2] == 4:  # If RGBA format
-                            frame = frame[:, :, :3]  # Convert to RGB by removing alpha
+                        if frame.shape[2] == 4:  # Convert RGBA to RGB if needed
+                            frame = frame[:, :, :3]
                         
-                        # Reuse buffer if possible to reduce memory allocations
+                        # Reuse buffer if possible
                         if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
-                            # First frame or shape changed, create new buffer
                             self.frame_buffer = np.empty_like(frame)
-                            
-                        # Copy frame data to buffer instead of creating a new array
                         np.copyto(self.frame_buffer, frame)
                         
-                        # Process frame immediately
+                        # Process based on mode
                         if self.app.rgb_mode.isChecked():
-                            # Process RGB frame directly
+                            # RGB mode
                             processed_array = self.process_frame_array(self.frame_buffer, 'RGB')
                         else:
-                            # Convert to grayscale
-                            if self.gray_buffer is None or self.gray_buffer.shape[:2] != frame.shape[:2]:
-                                self.gray_buffer = np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
-                            else:
-                                np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140], out=self.gray_buffer)
+                            # Create grayscale conversion
+                            gray = np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
                             
-                            # Process grayscale frame
-                            processed_array = self.process_frame_array(self.gray_buffer, 'L')
+                            # Process grayscale
+                            processed_array = self.process_frame_array(gray, 'L')
                         
-                        # Convert processed array to PIL image for display
+                        # Convert to PIL image for display
                         if processed_array is not None:
                             if processed_array.ndim == 3:
                                 pil_result = Image.fromarray(processed_array, 'RGB')
                             else:
                                 pil_result = Image.fromarray(processed_array, 'L')
                                 
-                            # Emit processed frame directly
+                            # Send to UI
                             self.frameProcessed.emit(pil_result)
                     else:
                         print(f"Invalid frame format: {frame.shape if frame is not None else None}")
                     
-                    # Update timing statistics
+                    # Update timing and adjust capture rate if needed
                     process_end = time.time()
                     process_time = process_end - process_start
-                    self.avg_process_time = 0.9 * self.avg_process_time + 0.1 * process_time
                     
-                    # Adjust capture rate based on processing time
-                    self.min_capture_interval = max(0.033, self.avg_process_time * 1.1)  # 10% buffer
+                    # Set minimum interval to slightly more than processing time
+                    # This ensures we don't capture frames faster than we can process
+                    self.min_capture_interval = process_time * 1.1
                     
-                    # Update last capture time after processing
+                    # Make sure we don't go below 30fps or above reasonable limits
+                    self.min_capture_interval = max(0.033, min(0.2, self.min_capture_interval))
+                    
+                    # Update last capture time
                     self.last_capture_time = time.time()
                     
                     # Report FPS every 5 seconds
@@ -361,7 +363,7 @@ class CameraCaptureThread(QThread):
                     if current_time - last_report_time > 5.0:
                         fps = frames_captured / (current_time - last_report_time)
                         cpu = self.get_cpu_usage()
-                        print(f"Camera fps: {fps:.1f}, avg process time: {self.avg_process_time*1000:.1f}ms, CPU: {cpu}%, skip: {self.frames_to_skip}")
+                        print(f"Camera fps: {fps:.1f}, process time: {process_time*1000:.1f}ms, CPU: {cpu}%")
                         frames_captured = 0
                         last_report_time = current_time
                         
@@ -369,7 +371,7 @@ class CameraCaptureThread(QThread):
                     print(f"Error capturing/processing frame: {e}")
                     import traceback
                     traceback.print_exc()
-                    # Don't break the loop for occasional errors, unless it's a device problem
+                    # Exit on device errors, continue for other errors
                     if "device" in str(e).lower() or "resource" in str(e).lower():
                         print("Device error detected, exiting capture loop")
                         break
@@ -379,7 +381,7 @@ class CameraCaptureThread(QThread):
             import traceback
             traceback.print_exc()
         finally:
-            # Always clean up camera resources
+            # Clean up
             self.stop_camera()
             print("Camera thread finished")
     
@@ -392,14 +394,8 @@ class CameraCaptureThread(QThread):
             contrast_factor = self.app.contrast_slider.value() / 100.0
             pixel_s = self.app.scale_slider.value()
             
-            # Make a copy of the input array to avoid modifying it
-            # Use a more efficient method to copy the array
-            if mode == 'RGB':
-                array_to_dither = np.empty_like(array)
-                np.copyto(array_to_dither, array)
-            else:
-                array_to_dither = np.empty_like(array)
-                np.copyto(array_to_dither, array)
+            # Simple direct copy
+            array_to_dither = array.copy()
             
             # Apply contrast if needed
             if abs(contrast_factor - 1.0) > 0.01:
@@ -421,42 +417,48 @@ class CameraCaptureThread(QThread):
                     print(f"Error applying contrast: {e}")
                     # Continue with original array
             
-            # Apply selected dithering algorithm directly on NumPy array
+            # Apply dithering algorithm 
             if alg == "Floyd-Steinberg":
                 if pixel_s == 1:
-                    # Apply dithering directly
+                    # Direct dithering
                     if mode == 'RGB':
-                        result = fs_dither(array_to_dither.astype(np.float32), 'RGB', thr)
+                        return fs_dither(array_to_dither.astype(np.float32), 'RGB', thr)
                     else:
-                        result = fs_dither(array_to_dither.astype(np.float32), 'L', thr)
+                        return fs_dither(array_to_dither.astype(np.float32), 'L', thr)
                 else:
-                    # For larger pixel scales, use downscale-dither-upscale approach
-                    # First create a smaller array by averaging blocks
+                    # Downscale-dither-upscale approach
                     orig_h, orig_w = array_to_dither.shape[:2]
                     small_h = max(1, orig_h // pixel_s)
                     small_w = max(1, orig_w // pixel_s)
                     
+                    # Create downscaled array using block averaging
                     if mode == 'RGB':
-                        # More efficient block averaging for RGB
                         small_arr = np.zeros((small_h, small_w, 3), dtype=np.float32)
-                        for y in range(small_h):
-                            y_start = y * pixel_s
-                            y_end = min((y+1) * pixel_s, orig_h)
-                            for x in range(small_w):
-                                x_start = x * pixel_s
-                                x_end = min((x+1) * pixel_s, orig_w)
-                                small_arr[y, x, :] = np.mean(array_to_dither[y_start:y_end, x_start:x_end, :], axis=(0, 1))
+                        # Use helper function from helper.py for block averaging
+                        small_arr = block_average_rgb(array_to_dither, small_arr, small_h, small_w, pixel_s)
                         
                         # Apply dithering to small array
                         dithered_small = fs_dither(small_arr, 'RGB', thr)
                         
-                        # More efficient upscaling using numpy broadcasting
+                        # Upscale using nearest neighbor
                         result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-                        for y in range(orig_h):
-                            y_small = min(y // pixel_s, small_h-1)
-                            for x in range(orig_w):
-                                x_small = min(x // pixel_s, small_w-1)
-                                result[y, x, :] = dithered_small[y_small, x_small, :]
+                        # More efficient upscaling 
+                        # For small images, use direct assignment which is faster for small arrays
+                        if is_small:
+                            result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+                            for y in range(orig_h):
+                                y_small = min(y // pixel_s, small_h-1)
+                                for x in range(orig_w):
+                                    x_small = min(x // pixel_s, small_w-1)
+                                    result[y, x, :] = dithered_small[y_small, x_small, :]
+                        else:
+                            # For larger images use vectorized approach
+                            result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+                            for y in range(orig_h):
+                                y_small = min(y // pixel_s, small_h-1)
+                                for x in range(orig_w):
+                                    x_small = min(x // pixel_s, small_w-1)
+                                    result[y, x, :] = dithered_small[y_small, x_small, :]
                     else:
                         # More efficient block averaging for grayscale
                         small_arr = np.zeros((small_h, small_w), dtype=np.float32)
@@ -471,7 +473,7 @@ class CameraCaptureThread(QThread):
                         # Apply dithering to small array
                         dithered_small = fs_dither(small_arr, 'L', thr)
                         
-                        # More efficient upscaling using numpy broadcasting
+                        # More efficient upscaling with direct assignment for small images
                         result = np.zeros((orig_h, orig_w), dtype=np.uint8)
                         for y in range(orig_h):
                             y_small = min(y // pixel_s, small_h-1)
@@ -717,8 +719,21 @@ class FrameProcessingThread(QThread):
             contrast_factor = self.app.contrast_slider.value() / 100.0
             pixel_s = self.app.scale_slider.value()
             
-            # Make a copy of the input array to avoid modifying it
-            array_to_dither = array.copy()
+            # Check if we have a small image
+            is_small = array.size < 150000  # Adjust based on your threshold
+            
+            # Optimize copy operations for small images
+            if is_small:
+                # For small images, direct copy is faster than empty_like + copyto
+                array_to_dither = array.copy()
+            else:
+                # For larger images, use the existing optimized approach
+                if mode == 'RGB':
+                    array_to_dither = np.empty_like(array)
+                    np.copyto(array_to_dither, array)
+                else:
+                    array_to_dither = np.empty_like(array)
+                    np.copyto(array_to_dither, array)
             
             # Apply contrast if needed
             if abs(contrast_factor - 1.0) > 0.01:
@@ -756,41 +771,57 @@ class FrameProcessingThread(QThread):
                     small_w = max(1, orig_w // pixel_s)
                     
                     if mode == 'RGB':
-                        # Resize RGB array using block averaging
+                        # More efficient block averaging for RGB
                         small_arr = np.zeros((small_h, small_w, 3), dtype=np.float32)
                         for y in range(small_h):
+                            y_start = y * pixel_s
+                            y_end = min((y+1) * pixel_s, orig_h)
                             for x in range(small_w):
-                                y1 = min((y+1) * pixel_s, orig_h)
-                                x1 = min((x+1) * pixel_s, orig_w)
-                                block = array_to_dither[y*pixel_s:y1, x*pixel_s:x1, :]
-                                small_arr[y, x, :] = np.mean(block, axis=(0, 1))
+                                x_start = x * pixel_s
+                                x_end = min((x+1) * pixel_s, orig_w)
+                                small_arr[y, x, :] = np.mean(array_to_dither[y_start:y_end, x_start:x_end, :], axis=(0, 1))
                         
                         # Apply dithering to small array
                         dithered_small = fs_dither(small_arr, 'RGB', thr)
                         
-                        # Upscale back using nearest neighbor approach
-                        result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
-                        for y in range(orig_h):
-                            for x in range(orig_w):
-                                result[y, x, :] = dithered_small[min(y // pixel_s, small_h-1), min(x // pixel_s, small_w-1), :]
+                        # More efficient upscaling 
+                        # For small images, use direct assignment which is faster for small arrays
+                        if is_small:
+                            result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+                            for y in range(orig_h):
+                                y_small = min(y // pixel_s, small_h-1)
+                                for x in range(orig_w):
+                                    x_small = min(x // pixel_s, small_w-1)
+                                    result[y, x, :] = dithered_small[y_small, x_small, :]
+                        else:
+                            # For larger images use vectorized approach
+                            result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+                            for y in range(orig_h):
+                                y_small = min(y // pixel_s, small_h-1)
+                                for x in range(orig_w):
+                                    x_small = min(x // pixel_s, small_w-1)
+                                    result[y, x, :] = dithered_small[y_small, x_small, :]
                     else:
-                        # Resize grayscale array using block averaging
+                        # More efficient block averaging for grayscale
                         small_arr = np.zeros((small_h, small_w), dtype=np.float32)
                         for y in range(small_h):
+                            y_start = y * pixel_s
+                            y_end = min((y+1) * pixel_s, orig_h)
                             for x in range(small_w):
-                                y1 = min((y+1) * pixel_s, orig_h)
-                                x1 = min((x+1) * pixel_s, orig_w)
-                                block = array_to_dither[y*pixel_s:y1, x*pixel_s:x1]
-                                small_arr[y, x] = np.mean(block)
+                                x_start = x * pixel_s
+                                x_end = min((x+1) * pixel_s, orig_w)
+                                small_arr[y, x] = np.mean(array_to_dither[y_start:y_end, x_start:x_end])
                         
                         # Apply dithering to small array
                         dithered_small = fs_dither(small_arr, 'L', thr)
                         
-                        # Upscale back using nearest neighbor approach
+                        # More efficient upscaling with direct assignment for small images
                         result = np.zeros((orig_h, orig_w), dtype=np.uint8)
                         for y in range(orig_h):
+                            y_small = min(y // pixel_s, small_h-1)
                             for x in range(orig_w):
-                                result[y, x] = dithered_small[min(y // pixel_s, small_h-1), min(x // pixel_s, small_w-1)]
+                                x_small = min(x // pixel_s, small_w-1)
+                                result[y, x] = dithered_small[y_small, x_small]
             elif alg == "Simple Threshold":
                 if pixel_s == 1:
                     # Apply simple threshold directly
@@ -804,7 +835,7 @@ class FrameProcessingThread(QThread):
                     result = simple_threshold_dither(array_to_dither, mode, pixel_s, orig_w, orig_h, thr)
             else:
                 result = array_to_dither  # Fallback
-            
+                
             return result
         except Exception as e:
             print(f"Error in process_frame_array: {e}")

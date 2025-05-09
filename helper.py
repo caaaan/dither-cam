@@ -1,32 +1,157 @@
 from numba import njit, prange
 import numpy as np
 
-@njit(parallel=True)
+@njit
 def fs_dither_rgb(img_array, threshold=128):
+    """Optimized Floyd-Steinberg dithering for RGB images"""
     h, w, c = img_array.shape
+    
+    # Create error buffers for each color channel
+    error_r = np.zeros((h, w+2), dtype=np.float32)
+    error_g = np.zeros((h, w+2), dtype=np.float32)
+    error_b = np.zeros((h, w+2), dtype=np.float32)
+    
+    # Copy original values to error buffers
     for y in range(h):
         for x in range(w):
-            # Access pixel values directly without copying
-            old_r = img_array[y, x, 0]
-            old_g = img_array[y, x, 1]
-            old_b = img_array[y, x, 2]
+            error_r[y, x+1] = float(img_array[y, x, 0])
+            error_g[y, x+1] = float(img_array[y, x, 1])
+            error_b[y, x+1] = float(img_array[y, x, 2])
+    
+    # Process the image row by row
+    for y in range(h):
+        for x in range(w):
+            # Get current values from error buffers
+            old_r = error_r[y, x+1]
+            old_g = error_g[y, x+1]
+            old_b = error_b[y, x+1]
             
-            # Calculate new values
-            new_r = 0 if old_r < threshold else 255
-            new_g = 0 if old_g < threshold else 255
-            new_b = 0 if old_b < threshold else 255
+            # Apply threshold to get new binary values
+            new_r = 0.0 if old_r < threshold else 255.0
+            new_g = 0.0 if old_g < threshold else 255.0
+            new_b = 0.0 if old_b < threshold else 255.0
+            
+            # Store results in output
+            img_array[y, x, 0] = int(new_r)
+            img_array[y, x, 1] = int(new_g)
+            img_array[y, x, 2] = int(new_b)
             
             # Calculate errors
             err_r = old_r - new_r
             err_g = old_g - new_g
             err_b = old_b - new_b
             
-            # Set the new pixel values
+            # Distribute errors to neighboring pixels
+            error_r[y, x+2] += err_r * 7/16        # right
+            error_g[y, x+2] += err_g * 7/16
+            error_b[y, x+2] += err_b * 7/16
+            
+            if y+1 < h:
+                error_r[y+1, x] += err_r * 3/16    # bottom left
+                error_g[y+1, x] += err_g * 3/16
+                error_b[y+1, x] += err_b * 3/16
+                
+                error_r[y+1, x+1] += err_r * 5/16  # bottom
+                error_g[y+1, x+1] += err_g * 5/16
+                error_b[y+1, x+1] += err_b * 5/16
+                
+                error_r[y+1, x+2] += err_r * 1/16  # bottom right
+                error_g[y+1, x+2] += err_g * 1/16
+                error_b[y+1, x+2] += err_b * 1/16
+    
+    return img_array
+
+@njit
+def fs_dither_greyscale(img_array, threshold=128):
+    """Optimized Floyd-Steinberg dithering for grayscale images"""
+    h, w = img_array.shape
+    
+    # Create error buffer array to avoid modifying original values too early
+    # This prevents artifacts in the dithering pattern
+    error_buffer = np.zeros((h, w+2), dtype=np.float32)  # +2 width for boundary handling
+    
+    # Copy original values to error buffer
+    for y in range(h):
+        for x in range(w):
+            error_buffer[y, x+1] = float(img_array[y, x])  # +1 offset
+    
+    # Process the image row by row
+    for y in range(h):
+        for x in range(w):
+            # Get current value from error buffer
+            old_val = error_buffer[y, x+1]  # +1 offset
+            
+            # Apply threshold to get new binary value
+            new_val = 0.0 if old_val < threshold else 255.0
+            
+            # Store result in output
+            img_array[y, x] = int(new_val)
+            
+            # Calculate error
+            error = old_val - new_val
+            
+            # Distribute error to neighboring pixels (error diffusion)
+            error_buffer[y, x+2] += error * 7/16        # right
+            if y+1 < h:
+                error_buffer[y+1, x] += error * 3/16    # bottom left
+                error_buffer[y+1, x+1] += error * 5/16  # bottom
+                error_buffer[y+1, x+2] += error * 1/16  # bottom right
+    
+    return img_array
+
+def fs_dither(arr, type, threshold=128):
+    """Apply Floyd-Steinberg dithering to an array"""
+    # Make a copy of the input array to avoid modifying the original
+    work_arr = arr.copy()
+    
+    if type == 'RGB':
+        result = fs_dither_rgb(work_arr, threshold)
+    else:  # type == 'L'
+        result = fs_dither_greyscale(work_arr, threshold)
+        
+    # Ensure final result is uint8
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+# Optimized version for small grayscale images without parallelization overhead
+@njit
+def fs_dither_greyscale_small(img_array, threshold=128):
+    h, w = img_array.shape
+    for y in range(h):
+        for x in range(w):
+            old = img_array[y, x]
+            new = 0 if old < threshold else 255
+            err = old - new
+            img_array[y, x] = new
+            if x+1 < w:
+                img_array[y, x+1] += err * 7/16
+            if y+1 < h:
+                if x > 0: img_array[y+1, x-1] += err * 3/16
+                img_array[y+1, x] += err * 5/16
+                if x+1 < w: img_array[y+1, x+1] += err * 1/16
+    return np.clip(img_array, 0, 255).astype(np.uint8)
+
+# Optimized version for small RGB images without parallelization overhead
+@njit
+def fs_dither_rgb_small(img_array, threshold=128):
+    h, w, c = img_array.shape
+    for y in range(h):
+        for x in range(w):
+            old_r = img_array[y, x, 0]
+            old_g = img_array[y, x, 1]
+            old_b = img_array[y, x, 2]
+            
+            new_r = 0 if old_r < threshold else 255
+            new_g = 0 if old_g < threshold else 255
+            new_b = 0 if old_b < threshold else 255
+            
+            err_r = old_r - new_r
+            err_g = old_g - new_g
+            err_b = old_b - new_b
+            
             img_array[y, x, 0] = new_r
             img_array[y, x, 1] = new_g
             img_array[y, x, 2] = new_b
             
-            # Distribute errors to neighboring pixels
             if x+1 < w:
                 img_array[y, x+1, 0] += err_r * 7/16
                 img_array[y, x+1, 1] += err_g * 7/16
@@ -46,45 +171,47 @@ def fs_dither_rgb(img_array, threshold=128):
                     img_array[y+1, x+1, 1] += err_g * 1/16
                     img_array[y+1, x+1, 2] += err_b * 1/16
     return np.clip(img_array, 0, 255).astype(np.uint8)
-
-@njit(parallel=True)
-def fs_dither_greyscale(img_array, threshold=128):
-    h, w = img_array.shape
-    for y in range(h):
-        for x in range(w):
-            old = img_array[y, x]
-            new = 0 if old < threshold else 255
-            err = old - new
-            img_array[y, x] = new
-            if x+1 < w:
-                img_array[y, x+1] += err * 7/16
-            if y+1 < h:
-                if x > 0: img_array[y+1, x-1] += err * 3/16
-                img_array[y+1, x] += err * 5/16
-                if x+1 < w: img_array[y+1, x+1] += err * 1/16
-    return np.clip(img_array, 0, 255).astype(np.uint8)
-
-def fs_dither(arr, type, threshold=128):
-    # Make a copy of the input array to avoid modifying the original
-    work_arr = arr.copy()
-    
-    if type == 'RGB':
-        return fs_dither_rgb(work_arr, threshold)
-    else:  # type == 'L'
-        return fs_dither_greyscale(work_arr, threshold)
     
 @njit
 def simple_threshold_rgb_ps1(arr, threshold=128):
     """Vectorized threshold for RGB images with pixel scale 1"""
-    # Use vectorized operations for better performance
-    result = np.zeros_like(arr)
-    for c in range(arr.shape[2]):
-        result[:, :, c] = np.where(arr[:, :, c] < threshold, 0, 255)
-    return result
+    # Fast direct implementation for small arrays
+    if arr.size < 10000:  # For small images
+        result = np.zeros_like(arr)
+        h, w, c = arr.shape
+        for y in range(h):
+            for x in range(w):
+                for c in range(3):
+                    result[y, x, c] = 0 if arr[y, x, c] < threshold else 255
+        return result
+    else:
+        # Use vectorized operations for larger images
+        result = np.zeros_like(arr)
+        for c in range(arr.shape[2]):
+            result[:, :, c] = np.where(arr[:, :, c] < threshold, 0, 255)
+        return result
 
 @njit(parallel=True)
 def simple_threshold_greyscale_psMore(img_array, pixel_scale, orig_w, orig_h, threshold=128):
     """Optimized threshold for grayscale images with pixel scale > 1"""
+    # For small images, don't create the block lookup arrays
+    if orig_h * orig_w < 10000:
+        out_array = np.zeros((orig_h, orig_w), dtype=np.uint8)
+        for y0 in range(0, orig_h, pixel_scale):
+            y1 = min(y0 + pixel_scale, orig_h)
+            for x0 in range(0, orig_w, pixel_scale):
+                x1 = min(x0 + pixel_scale, orig_w)
+                
+                if x1 - x0 <= 0 or y1 - y0 <= 0:
+                    continue
+                
+                block = img_array[y0:y1, x0:x1]
+                mean_val = np.mean(block)
+                block_color = 0 if mean_val < threshold else 255
+                out_array[y0:y1, x0:x1] = block_color
+        return out_array
+    
+    # For larger images, use the more complex optimization
     # Pre-allocate output array
     out_array = np.zeros((orig_h, orig_w), dtype=np.uint8)
     
@@ -117,6 +244,30 @@ def simple_threshold_greyscale_psMore(img_array, pixel_scale, orig_w, orig_h, th
 @njit(parallel=True)
 def simple_threshold_rgb_psMore(img_array, pixel_scale, orig_w, orig_h, threshold=128):
     """Optimized threshold for RGB images with pixel scale > 1"""
+    # For small images, use a simpler approach
+    if orig_h * orig_w < 10000:
+        out_array = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+        means = np.zeros(3, dtype=np.float32)
+        
+        for y0 in range(0, orig_h, pixel_scale):
+            y1 = min(y0 + pixel_scale, orig_h)
+            for x0 in range(0, orig_w, pixel_scale):
+                x1 = min(x0 + pixel_scale, orig_w)
+                
+                if x1 - x0 <= 0 or y1 - y0 <= 0:
+                    continue
+                
+                block = img_array[y0:y1, x0:x1, :]
+                for c in range(3):
+                    channel_block = block[:, :, c]
+                    means[c] = np.mean(channel_block)
+                
+                block_color = np.where(means < threshold, 0, 255).astype(np.uint8)
+                for c in range(3):
+                    out_array[y0:y1, x0:x1, c] = block_color[c]
+        return out_array
+    
+    # For larger images, use the more complex optimization
     # Pre-allocate output array
     out_array = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
     
@@ -160,3 +311,84 @@ def simple_threshold_dither(arr, type, pixel_scale, orig_w, orig_h, threshold=12
         return simple_threshold_rgb_psMore(arr, pixel_scale, orig_w, orig_h, threshold)
     else:
         return simple_threshold_greyscale_psMore(arr, pixel_scale, orig_w, orig_h, threshold)
+
+@njit
+def block_average_rgb(array, out_array, small_h, small_w, pixel_s):
+    """Optimized block averaging for RGB images with Numba"""
+    orig_h, orig_w, _ = array.shape
+    
+    for y in range(small_h):
+        y_start = y * pixel_s
+        y_end = min((y+1) * pixel_s, orig_h)
+        for x in range(small_w):
+            x_start = x * pixel_s
+            x_end = min((x+1) * pixel_s, orig_w)
+            
+            # Sum values for each channel
+            r_sum = 0.0
+            g_sum = 0.0
+            b_sum = 0.0
+            count = 0
+            
+            # Manual averaging is faster with Numba than using np.mean with axis parameter
+            for yy in range(y_start, y_end):
+                for xx in range(x_start, x_end):
+                    r_sum += array[yy, xx, 0]
+                    g_sum += array[yy, xx, 1]
+                    b_sum += array[yy, xx, 2]
+                    count += 1
+            
+            if count > 0:
+                out_array[y, x, 0] = r_sum / count
+                out_array[y, x, 1] = g_sum / count
+                out_array[y, x, 2] = b_sum / count
+    
+    return out_array
+
+@njit
+def block_average_gray(array, out_array, small_h, small_w, pixel_s):
+    """Optimized block averaging for grayscale images with Numba"""
+    orig_h, orig_w = array.shape
+    
+    for y in range(small_h):
+        y_start = y * pixel_s
+        y_end = min((y+1) * pixel_s, orig_h)
+        for x in range(small_w):
+            x_start = x * pixel_s
+            x_end = min((x+1) * pixel_s, orig_w)
+            
+            # Manual sum is faster with Numba
+            val_sum = 0.0
+            count = 0
+            
+            for yy in range(y_start, y_end):
+                for xx in range(x_start, x_end):
+                    val_sum += array[yy, xx]
+                    count += 1
+            
+            if count > 0:
+                out_array[y, x] = val_sum / count
+    
+    return out_array
+
+@njit
+def nearest_upscale_rgb(small_arr, out_array, orig_h, orig_w, small_h, small_w, pixel_s):
+    """Optimized nearest neighbor upscaling for RGB images"""
+    for y in range(orig_h):
+        y_small = min(y // pixel_s, small_h-1)
+        for x in range(orig_w):
+            x_small = min(x // pixel_s, small_w-1)
+            out_array[y, x, 0] = small_arr[y_small, x_small, 0]
+            out_array[y, x, 1] = small_arr[y_small, x_small, 1]
+            out_array[y, x, 2] = small_arr[y_small, x_small, 2]
+    return out_array
+
+@njit
+def nearest_upscale_gray(small_arr, out_array, orig_h, orig_w, small_h, small_w, pixel_s):
+    """Optimized nearest neighbor upscaling for grayscale images"""
+    for y in range(orig_h):
+        y_small = min(y // pixel_s, small_h-1)
+        for x in range(orig_w):
+            x_small = min(x // pixel_s, small_w-1)
+            out_array[y, x] = small_arr[y_small, x_small]
+    return out_array
