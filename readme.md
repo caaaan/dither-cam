@@ -241,3 +241,47 @@ This will launch the application window.
     *   **Windows:** Tkinter support is typically included with official Python installers.
 
     After installing these system libraries, you might need to recreate your virtual environment or reinstall Python itself in some cases.
+
+## Performance Optimizations
+
+The application includes several optimizations to minimize CPU usage and improve responsiveness:
+
+### Memory Management
+- Buffer reuse for frame capture and processing
+- Only allocates new memory when frame sizes change 
+- Uses `np.empty_like()` and `np.copyto()` instead of creating new arrays
+- Pre-calculated block boundaries for pixel scaling operations
+
+### Parallel Processing
+- Uses Numba JIT compilation with parallelization for dithering algorithms
+- Optimized vectorized operations where possible
+- Parallel block processing for threshold operations
+
+### Adaptive Performance
+- Dynamic frame skipping based on CPU usage targeting 25% CPU
+- Automatically adjusts frame rate based on processing capabilities
+- Tracks performance metrics to adapt processing strategy
+
+### Thread Management
+- Integrated capture and processing in a single thread
+- Direct processing of camera frames without intermediate conversions
+- Careful thread synchronization with reusable buffers
+
+### Resource Cleanup
+- Robust camera resource management
+- System-level cleanup to ensure resources are released
+- Multiple safeguards for proper thread termination
+
+## Building Standalone Application
+
+To build a standalone executable:
+
+```
+python build.py
+```
+
+This will create an executable in the `dist` directory.
+
+## License
+
+See the LICENSE file for details.

@@ -44,6 +44,123 @@ class CameraCaptureThread(QThread):
         self.frames_processed = 0
         self.last_report_time = time.time()
         self.avg_process_time = 0.033  # Initial guess at processing time
+        self.cpu_usage_history = []
+        
+        # Resolution control
+        self.current_pixel_scale = 1
+        self.base_width = 640  # Base resolution width
+        self.base_height = 480  # Base resolution height
+        
+        # Dynamic frame skipping for CPU load management
+        self.frames_to_skip = 0
+        self.skip_counter = 0
+        self.target_cpu_percent = 25  # Target CPU usage percentage
+        self.last_cpu_check = time.time()
+        self.cpu_check_interval = 1.0  # Check CPU usage every second
+        
+    def reconfigure_resolution(self, pixel_scale):
+        """Dynamically reconfigure the camera resolution based on pixel scale"""
+        if not self.camera_initialized or self.camera is None:
+            return False
+        
+        if pixel_scale == self.current_pixel_scale:
+            # No change needed
+            return True
+            
+        try:
+            print(f"Reconfiguring camera resolution for pixel scale: {pixel_scale}")
+            
+            # Calculate new resolution
+            new_width = max(320, self.base_width // pixel_scale)
+            new_height = max(240, self.base_height // pixel_scale)
+            
+            # Make width and height even numbers (required by some cameras)
+            new_width = new_width - (new_width % 2)
+            new_height = new_height - (new_height % 2)
+            
+            print(f"New camera resolution: {new_width}x{new_height}")
+            
+            with self.camera_lock:
+                # Stop camera before reconfiguring
+                self.camera.stop()
+                time.sleep(0.5)
+                
+                # Create new configuration with updated resolution
+                preview_config = self.camera.create_still_configuration(
+                    main={"size": (new_width, new_height), "format": "RGB888"}
+                )
+                
+                # Apply new configuration
+                self.camera.configure(preview_config)
+                time.sleep(0.5)
+                
+                # Restart the camera
+                self.camera.start()
+                time.sleep(1.0)
+                
+                # Test capture to verify it's working
+                test_frame = self.camera.capture_array()
+                if test_frame is None:
+                    raise RuntimeError("Failed to capture test frame after reconfiguration")
+                
+                print(f"Camera reconfigured successfully. Frame shape: {test_frame.shape}")
+                self.current_pixel_scale = pixel_scale
+                
+                # Clear old buffers to force recreation with new size
+                self.frame_buffer = None
+                self.gray_buffer = None
+                
+                return True
+                
+        except Exception as e:
+            print(f"Error reconfiguring camera: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try to restore camera to running state
+            try:
+                self.camera.start()
+            except:
+                pass
+                
+            return False
+        
+    def get_cpu_usage(self):
+        try:
+            import psutil
+            return psutil.cpu_percent(interval=None)
+        except:
+            return 0  # Return 0 if psutil is not available
+            
+    def update_dynamic_frame_skip(self):
+        """Adjust frames to skip based on current CPU usage to maintain target CPU usage"""
+        now = time.time()
+        if now - self.last_cpu_check < self.cpu_check_interval:
+            return
+            
+        self.last_cpu_check = now
+        current_cpu = self.get_cpu_usage()
+        self.cpu_usage_history.append(current_cpu)
+        
+        # Keep only the last 5 measurements
+        if len(self.cpu_usage_history) > 5:
+            self.cpu_usage_history.pop(0)
+            
+        # Calculate average CPU usage
+        avg_cpu = sum(self.cpu_usage_history) / len(self.cpu_usage_history)
+        
+        # Adjust frames to skip based on CPU usage
+        if avg_cpu > self.target_cpu_percent + 5:  # CPU usage too high
+            self.frames_to_skip = min(10, self.frames_to_skip + 1)  # Increase skip, max 10
+        elif avg_cpu < self.target_cpu_percent - 5 and self.frames_to_skip > 0:  # CPU usage too low
+            self.frames_to_skip = max(0, self.frames_to_skip - 1)  # Decrease skip, min 0
+            
+        # If process time is very low, don't skip frames
+        if self.avg_process_time < 0.01:  # Less than 10ms
+            self.frames_to_skip = 0
+            
+        if self.frames_to_skip > 0 and len(self.cpu_usage_history) >= 3:
+            print(f"CPU: {avg_cpu:.1f}%, skipping {self.frames_to_skip} frames, process time: {self.avg_process_time*1000:.1f}ms")
         
     def run(self):
         print("Camera thread starting...")
@@ -71,9 +188,23 @@ class CameraCaptureThread(QThread):
                         # Wait before configuring
                         time.sleep(2.0)
                         
-                        # Use the simplest configuration possible
+                        # Get current pixel scale
+                        pixel_scale = self.app.scale_slider.value()
+                        self.current_pixel_scale = pixel_scale
+                        
+                        # Calculate resolution based on pixel scale
+                        width = max(320, self.base_width // pixel_scale)
+                        height = max(240, self.base_height // pixel_scale)
+                        
+                        # Make width and height even numbers
+                        width = width - (width % 2)
+                        height = height - (height % 2)
+                        
+                        print(f"Initial camera resolution: {width}x{height}")
+                        
+                        # Use the simplest configuration possible with resolution
                         preview_config = self.camera.create_still_configuration(
-                            main={"size": (640, 480), "format": "RGB888"}
+                            main={"size": (width, height), "format": "RGB888"}
                         )
                         
                         print(f"Using camera config: {preview_config}")
@@ -143,6 +274,18 @@ class CameraCaptureThread(QThread):
                     if sleep_time > 0.001:  # Only sleep for meaningful intervals
                         time.sleep(sleep_time)
                     continue
+                
+                # Apply dynamic frame skipping to reduce CPU load
+                self.update_dynamic_frame_skip()
+                if self.frames_to_skip > 0:
+                    self.skip_counter += 1
+                    if self.skip_counter < self.frames_to_skip:
+                        # Skip this frame, just update the time
+                        self.last_capture_time = time.time()
+                        continue
+                    else:
+                        # Process this frame and reset counter
+                        self.skip_counter = 0
                 
                 # Measure frame processing time
                 process_start = time.time()
@@ -217,7 +360,8 @@ class CameraCaptureThread(QThread):
                     current_time = time.time()
                     if current_time - last_report_time > 5.0:
                         fps = frames_captured / (current_time - last_report_time)
-                        print(f"Camera fps: {fps:.1f}, avg process time: {self.avg_process_time*1000:.1f}ms")
+                        cpu = self.get_cpu_usage()
+                        print(f"Camera fps: {fps:.1f}, avg process time: {self.avg_process_time*1000:.1f}ms, CPU: {cpu}%, skip: {self.frames_to_skip}")
                         frames_captured = 0
                         last_report_time = current_time
                         
@@ -249,7 +393,13 @@ class CameraCaptureThread(QThread):
             pixel_s = self.app.scale_slider.value()
             
             # Make a copy of the input array to avoid modifying it
-            array_to_dither = array.copy()
+            # Use a more efficient method to copy the array
+            if mode == 'RGB':
+                array_to_dither = np.empty_like(array)
+                np.copyto(array_to_dither, array)
+            else:
+                array_to_dither = np.empty_like(array)
+                np.copyto(array_to_dither, array)
             
             # Apply contrast if needed
             if abs(contrast_factor - 1.0) > 0.01:
@@ -287,41 +437,47 @@ class CameraCaptureThread(QThread):
                     small_w = max(1, orig_w // pixel_s)
                     
                     if mode == 'RGB':
-                        # Resize RGB array using block averaging
+                        # More efficient block averaging for RGB
                         small_arr = np.zeros((small_h, small_w, 3), dtype=np.float32)
                         for y in range(small_h):
+                            y_start = y * pixel_s
+                            y_end = min((y+1) * pixel_s, orig_h)
                             for x in range(small_w):
-                                y1 = min((y+1) * pixel_s, orig_h)
-                                x1 = min((x+1) * pixel_s, orig_w)
-                                block = array_to_dither[y*pixel_s:y1, x*pixel_s:x1, :]
-                                small_arr[y, x, :] = np.mean(block, axis=(0, 1))
+                                x_start = x * pixel_s
+                                x_end = min((x+1) * pixel_s, orig_w)
+                                small_arr[y, x, :] = np.mean(array_to_dither[y_start:y_end, x_start:x_end, :], axis=(0, 1))
                         
                         # Apply dithering to small array
                         dithered_small = fs_dither(small_arr, 'RGB', thr)
                         
-                        # Upscale back using nearest neighbor approach
+                        # More efficient upscaling using numpy broadcasting
                         result = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
                         for y in range(orig_h):
+                            y_small = min(y // pixel_s, small_h-1)
                             for x in range(orig_w):
-                                result[y, x, :] = dithered_small[min(y // pixel_s, small_h-1), min(x // pixel_s, small_w-1), :]
+                                x_small = min(x // pixel_s, small_w-1)
+                                result[y, x, :] = dithered_small[y_small, x_small, :]
                     else:
-                        # Resize grayscale array using block averaging
+                        # More efficient block averaging for grayscale
                         small_arr = np.zeros((small_h, small_w), dtype=np.float32)
                         for y in range(small_h):
+                            y_start = y * pixel_s
+                            y_end = min((y+1) * pixel_s, orig_h)
                             for x in range(small_w):
-                                y1 = min((y+1) * pixel_s, orig_h)
-                                x1 = min((x+1) * pixel_s, orig_w)
-                                block = array_to_dither[y*pixel_s:y1, x*pixel_s:x1]
-                                small_arr[y, x] = np.mean(block)
+                                x_start = x * pixel_s
+                                x_end = min((x+1) * pixel_s, orig_w)
+                                small_arr[y, x] = np.mean(array_to_dither[y_start:y_end, x_start:x_end])
                         
                         # Apply dithering to small array
                         dithered_small = fs_dither(small_arr, 'L', thr)
                         
-                        # Upscale back using nearest neighbor approach
+                        # More efficient upscaling using numpy broadcasting
                         result = np.zeros((orig_h, orig_w), dtype=np.uint8)
                         for y in range(orig_h):
+                            y_small = min(y // pixel_s, small_h-1)
                             for x in range(orig_w):
-                                result[y, x] = dithered_small[min(y // pixel_s, small_h-1), min(x // pixel_s, small_w-1)]
+                                x_small = min(x // pixel_s, small_w-1)
+                                result[y, x] = dithered_small[y_small, x_small]
             elif alg == "Simple Threshold":
                 if pixel_s == 1:
                     # Apply simple threshold directly

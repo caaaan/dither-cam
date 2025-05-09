@@ -1,7 +1,7 @@
-from numba import njit
+from numba import njit, prange
 import numpy as np
 
-@njit
+@njit(parallel=True)
 def fs_dither_rgb(img_array, threshold=128):
     h, w, c = img_array.shape
     for y in range(h):
@@ -47,7 +47,7 @@ def fs_dither_rgb(img_array, threshold=128):
                     img_array[y+1, x+1, 2] += err_b * 1/16
     return np.clip(img_array, 0, 255).astype(np.uint8)
 
-@njit
+@njit(parallel=True)
 def fs_dither_greyscale(img_array, threshold=128):
     h, w = img_array.shape
     for y in range(h):
@@ -75,67 +75,87 @@ def fs_dither(arr, type, threshold=128):
     
 @njit
 def simple_threshold_rgb_ps1(arr, threshold=128):
-
-    # Process each band separately for RGB using NumPy
-    
+    """Vectorized threshold for RGB images with pixel scale 1"""
+    # Use vectorized operations for better performance
     result = np.zeros_like(arr)
-    
-    # Apply threshold to each channel independently
     for c in range(arr.shape[2]):
-        channel = arr[:, :, c]
-        result[:, :, c] = np.where(channel < threshold, 0, 255)
-    
+        result[:, :, c] = np.where(arr[:, :, c] < threshold, 0, 255)
     return result
 
-@njit
+@njit(parallel=True)
 def simple_threshold_greyscale_psMore(img_array, pixel_scale, orig_w, orig_h, threshold=128):
-    out_array = np.zeros_like(img_array)
-            
-    for y0 in range(0, orig_h, pixel_scale):
-        for x0 in range(0, orig_w, pixel_scale):
-            x1 = min(x0 + pixel_scale, orig_w)
-            y1 = min(y0 + pixel_scale, orig_h)
+    """Optimized threshold for grayscale images with pixel scale > 1"""
+    # Pre-allocate output array
+    out_array = np.zeros((orig_h, orig_w), dtype=np.uint8)
+    
+    # Pre-calculate block boundaries to avoid redundant calculations
+    y_blocks = [(y, min(y + pixel_scale, orig_h)) 
+               for y in range(0, orig_h, pixel_scale)]
+    
+    x_blocks = [(x, min(x + pixel_scale, orig_w)) 
+               for x in range(0, orig_w, pixel_scale)]
+    
+    # Process blocks in parallel
+    for y_idx in prange(len(y_blocks)):
+        y0, y1 = y_blocks[y_idx]
+        for x_idx in range(len(x_blocks)):
+            x0, x1 = x_blocks[x_idx]
             
             if x1 - x0 <= 0 or y1 - y0 <= 0:
                 continue
             
-
+            # Calculate block mean
             block = img_array[y0:y1, x0:x1]
-            # Calculate mean
-            mean = np.mean(block)
-            # Apply threshold
-            block_color = 0 if mean < threshold else 255
-            # Fill the output block
+            mean_val = np.mean(block)
+            
+            # Apply threshold and fill the block
+            block_color = 0 if mean_val < threshold else 255
             out_array[y0:y1, x0:x1] = block_color
+    
     return out_array
 
-@njit
+@njit(parallel=True)
 def simple_threshold_rgb_psMore(img_array, pixel_scale, orig_w, orig_h, threshold=128):
-    out_array = np.zeros_like(img_array)
-            
-    for y0 in range(0, orig_h, pixel_scale):
-        for x0 in range(0, orig_w, pixel_scale):
-            x1 = min(x0 + pixel_scale, orig_w)
-            y1 = min(y0 + pixel_scale, orig_h)
+    """Optimized threshold for RGB images with pixel scale > 1"""
+    # Pre-allocate output array
+    out_array = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
+    
+    # Pre-calculate block boundaries to avoid redundant calculations
+    y_blocks = [(y, min(y + pixel_scale, orig_h)) 
+               for y in range(0, orig_h, pixel_scale)]
+    
+    x_blocks = [(x, min(x + pixel_scale, orig_w)) 
+               for x in range(0, orig_w, pixel_scale)]
+    
+    # Pre-allocate means array
+    means = np.zeros(3, dtype=np.float32)
+    
+    # Process blocks in parallel
+    for y_idx in prange(len(y_blocks)):
+        y0, y1 = y_blocks[y_idx]
+        for x_idx in range(len(x_blocks)):
+            x0, x1 = x_blocks[x_idx]
             
             if x1 - x0 <= 0 or y1 - y0 <= 0:
                 continue
-
+            
+            # Calculate mean for each channel
             block = img_array[y0:y1, x0:x1, :]
-            # Calculate mean for each channel manually instead of using axis=(0,1)
-            means = np.zeros(3, dtype=np.float32)
-            for c in range(3):  # Assuming 3 channels (RGB)
+            for c in range(3):
                 channel_block = block[:, :, c]
-                means[c] = np.mean(channel_block)  # This uses axis=None which is supported
+                means[c] = np.mean(channel_block)
             
             # Apply threshold to each channel
             block_color = np.where(means < threshold, 0, 255).astype(np.uint8)
-            # Fill the output block
-            out_array[y0:y1, x0:x1, :] = block_color
             
+            # Fill the block with the calculated color
+            for c in range(3):
+                out_array[y0:y1, x0:x1, c] = block_color[c]
+    
     return out_array
 
 def simple_threshold_dither(arr, type, pixel_scale, orig_w, orig_h, threshold=128):
+    """Direct thresholding with specified pixel scale"""
     if type == 'RGB':
         return simple_threshold_rgb_psMore(arr, pixel_scale, orig_w, orig_h, threshold)
     else:
