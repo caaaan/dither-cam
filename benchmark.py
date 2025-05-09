@@ -8,8 +8,9 @@ import time
 import numpy as np
 from PIL import Image
 import psutil
-import helper
 import argparse
+from classes.helper import (fs_dither, simple_threshold_rgb_ps1, simple_threshold_rgb_psMore,
+                           simple_threshold_greyscale_psMore)
 
 def benchmark_threshold(image_array, iterations=100, pixel_scale=1, threshold=128):
     """
@@ -24,16 +25,16 @@ def benchmark_threshold(image_array, iterations=100, pixel_scale=1, threshold=12
     for _ in range(iterations):
         if mode == 'RGB':
             if pixel_scale == 1:
-                helper.simple_threshold_rgb_ps1(image_array, threshold)
+                simple_threshold_rgb_ps1(image_array, threshold)
             else:
                 orig_h, orig_w = image_array.shape[:2]
-                helper.simple_threshold_rgb_psMore(image_array, pixel_scale, orig_w, orig_h, threshold)
+                simple_threshold_rgb_psMore(image_array, pixel_scale, orig_w, orig_h, threshold)
         else:
             if pixel_scale == 1:
                 np.where(image_array < threshold, 0, 255).astype(np.uint8)
             else:
                 orig_h, orig_w = image_array.shape[:2]
-                helper.simple_threshold_greyscale_psMore(image_array, pixel_scale, orig_w, orig_h, threshold)
+                simple_threshold_greyscale_psMore(image_array, pixel_scale, orig_w, orig_h, threshold)
     
     cpu_usage = psutil.cpu_percent(interval=None)
     end_time = time.time()
@@ -61,7 +62,7 @@ def benchmark_fs_dither(image_array, iterations=100, pixel_scale=1, threshold=12
     array_float = image_array.astype(np.float32)
     
     for _ in range(iterations):
-        helper.fs_dither(array_float.copy(), mode, threshold)
+        fs_dither(array_float.copy(), mode, threshold)
     
     cpu_usage = psutil.cpu_percent(interval=None)
     end_time = time.time()
