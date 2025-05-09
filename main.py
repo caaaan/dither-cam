@@ -15,7 +15,7 @@ from helper import fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither
 
 # Try to import picamera only if available (for development on non-Pi platforms)
 try:
-    import picamera
+    from picamera2 import Picamera2
     PICAMERA_AVAILABLE = True
 except ImportError:
     PICAMERA_AVAILABLE = False
@@ -31,7 +31,7 @@ class CameraCaptureThread(QThread):
         
         if PICAMERA_AVAILABLE:
             try:
-                self.camera = picamera.PiCamera()
+                self.camera = Picamera2()
                 self.camera.resolution = (640, 480)
                 self.camera_initialized = True
                 print("Camera initialized successfully")
