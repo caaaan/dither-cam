@@ -30,6 +30,7 @@ class CameraCaptureThread(QThread):
         self.frame_queue = frame_queue
         self.camera = None
         self.camera_initialized = False
+        self.camera_lock = threading.Lock()  # Add lock for thread safety
         
     def run(self):
         print("Camera capture thread starting...")
@@ -41,37 +42,135 @@ class CameraCaptureThread(QThread):
         self.is_running = True
         
         try:
-            # Initialize camera
-            self.camera = Picamera2()
+            # Try multiple initialization attempts if needed
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    # Force release camera at system level before trying to initialize
+                    try:
+                        # Try to force close any existing camera instances at system level
+                        import os
+                        import subprocess
+                        
+                        print(f"Camera initialization attempt {attempt+1}/{max_attempts}")
+                        
+                        # Kill any existing camera processes
+                        os.system("sudo pkill -f libcamera")
+                        time.sleep(1)
+                        
+                        # Try a quick camera capture with native tool to reset
+                        try:
+                            subprocess.run(["sudo", "libcamera-still", "-t", "1", "--immediate"], 
+                                           stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=3)
+                        except subprocess.TimeoutExpired:
+                            print("libcamera-still timed out, continuing anyway")
+                            
+                        time.sleep(2)
+                        print("Attempted system-level camera reset")
+                        
+                        # Force garbage collection
+                        import gc
+                        gc.collect()
+                    except Exception as e:
+                        print(f"System-level camera reset failed (non-critical): {e}")
+                    
+                    with self.camera_lock:
+                        # Initialize camera with different approach for each attempt
+                        if attempt == 0:
+                            # Standard initialization
+                            self.camera = Picamera2()
+                        elif attempt == 1:
+                            # Try with specific camera ID
+                            self.camera = Picamera2(camera_num=0)
+                        else:
+                            # Try with explicit hardware configuration
+                            from picamera2.configuration import create_preview_configuration
+                            self.camera = Picamera2()
+                        
+                        # Force some delay between creating the camera object and configuring it
+                        time.sleep(2)
+                        
+                        # Configure camera with different options based on attempt
+                        if attempt == 0:
+                            # Standard preview configuration
+                            preview_config = self.camera.create_preview_configuration(
+                                main={"size": (640, 480), "format": "RGB888"},
+                                controls={"FrameDurationLimits": (33333, 33333)}  # ~30fps
+                            )
+                        elif attempt == 1:
+                            # Simpler configuration
+                            preview_config = self.camera.create_preview_configuration()
+                            preview_config["main"]["size"] = (640, 480)
+                            preview_config["main"]["format"] = "RGB888"
+                        else:
+                            # Minimal configuration
+                            preview_config = self.camera.create_preview_configuration(
+                                main={"size": (640, 480)}
+                            )
+                        
+                        print(f"Using camera config: {preview_config}")
+                        self.camera.configure(preview_config)
+                        
+                        # Wait more before starting
+                        time.sleep(2)
+                        
+                        # Start camera
+                        print("Starting camera...")
+                        self.camera.start()
+                        
+                        # Wait a moment for camera to initialize
+                        time.sleep(2.0)
+                        self.camera_initialized = True
+                        print("Camera initialized successfully")
+                        
+                        # If we got here, initialization succeeded
+                        break
+                except Exception as e:
+                    print(f"Camera initialization attempt {attempt+1} failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # Clean up resources before trying again
+                    try:
+                        if hasattr(self, 'camera') and self.camera is not None:
+                            self.camera.close()
+                    except:
+                        pass
+                    self.camera = None
+                    self.camera_initialized = False
+                    
+                    # Wait before next attempt
+                    time.sleep(2)
+                    
+                    # Last attempt failed
+                    if attempt == max_attempts - 1:
+                        print("All camera initialization attempts failed")
+                        self.is_running = False
+                        return
             
-            # Configure camera for preview/video streaming
-            preview_config = self.camera.create_preview_configuration(
-                main={"size": (640, 480), "format": "RGB888"},
-                controls={"FrameDurationLimits": (33333, 33333)}  # ~30fps
-            )
-            self.camera.configure(preview_config)
-            
-            # Start camera
-            print("Starting camera...")
-            self.camera.start()
-            
-            # Wait a moment for camera to initialize
-            time.sleep(1.0)
-            self.camera_initialized = True
-            print("Camera initialized successfully")
-            
-            # Main capture loop
+            # Main capture loop - only reached if initialization succeeded
             frames_captured = 0
             last_report_time = time.time()
-            
+                
             while self.is_running:
-                if not self.camera_initialized:
+                if not self.camera_initialized or self.camera is None:
                     print("Camera not properly initialized, stopping thread")
                     break
                     
                 try:
-                    # Capture frame directly as numpy array
-                    frame = self.camera.capture_array()
+                    # Check if we should still be running before capturing
+                    if not self.is_running:
+                        break
+                        
+                    # Use lock when accessing camera 
+                    with self.camera_lock:
+                        if self.camera is None:
+                            print("Camera object is None, exiting capture loop")
+                            break
+                            
+                        # Capture frame directly as numpy array
+                        frame = self.camera.capture_array()
+                    
                     frames_captured += 1
                     
                     # Report FPS every 5 seconds
@@ -82,12 +181,12 @@ class CameraCaptureThread(QThread):
                         frames_captured = 0
                         last_report_time = current_time
                     
-                    # Ensure the frame is in RGB format
+                    # Ensure the frame is in RGB format (always capture in RGB, conversion to grayscale happens later)
                     if frame is not None and len(frame.shape) == 3:
                         if frame.shape[2] == 4:  # If RGBA format
                             frame = frame[:, :, :3]  # Convert to RGB by removing alpha
                         
-                        # Add captured frame to the queue
+                        # Always put RGB frames in the queue - conversion to grayscale happens in processing thread
                         if not self.frame_queue.full():
                             self.frame_queue.put(frame.copy())  # Make a copy to avoid reference issues
                     else:
@@ -95,7 +194,10 @@ class CameraCaptureThread(QThread):
                         
                 except Exception as e:
                     print(f"Error capturing frame: {e}")
-                    # Don't break the loop for occasional errors
+                    # Don't break the loop for occasional errors, unless it's a device problem
+                    if "device" in str(e).lower() or "resource" in str(e).lower():
+                        print("Device error detected, exiting capture loop")
+                        break
                     
                 # Sleep to maintain frame rate
                 time.sleep(0.03)  # ~30 FPS
@@ -111,22 +213,41 @@ class CameraCaptureThread(QThread):
     
     def stop_camera(self):
         """Clean up camera resources safely"""
-        if hasattr(self, 'camera') and self.camera is not None:
-            try:
-                print("Stopping camera device...")
-                self.camera.stop()
-                print("Camera stopped successfully")
-            except Exception as e:
-                print(f"Error stopping camera: {e}")
-            
-            # Clear reference
-            self.camera = None
-            self.camera_initialized = False
+        with self.camera_lock:
+            if self.camera is not None:
+                try:
+                    print("Stopping camera device...")
+                    self.camera.stop()
+                    # Set to None immediately to prevent reuse
+                    camera_ref = self.camera
+                    self.camera = None
+                    self.camera_initialized = False
+                    
+                    # Now close the camera outside the critical section
+                    time.sleep(0.5)  # Give it a moment to stop properly
+                    print("Camera stopped successfully")
+                except Exception as e:
+                    print(f"Error stopping camera: {e}")
+                    self.camera = None
+                    self.camera_initialized = False
+            else:
+                print("Camera was already None")
+        
+        # Try to help the system release camera resources
+        try:
+            # Run garbage collection to help release resources
+            import gc
+            gc.collect()
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
 
     def stop(self):
         """Stop the thread safely"""
         print("Requesting camera thread to stop...")
         self.is_running = False
+        # Give thread a moment to notice the flag
+        time.sleep(0.2)
         self.stop_camera()  # Stop the camera right away
 
 class FrameProcessingThread(QThread):
@@ -209,12 +330,20 @@ class FrameProcessingThread(QThread):
             thr = self.app.threshold_slider.value()
             contrast_factor = self.app.contrast_slider.value() / 100.0
             pixel_s = self.app.scale_slider.value()
+            use_rgb = self.app.rgb_mode.isChecked()
+            
+            # Convert to appropriate mode if needed
+            if use_rgb and pil_img.mode != 'RGB':
+                image_to_dither = pil_img.convert('RGB')
+            elif not use_rgb and pil_img.mode != 'L':
+                image_to_dither = pil_img.convert('L')
+            else:
+                image_to_dither = pil_img
             
             # Apply contrast if needed
-            image_to_dither = pil_img
             if abs(contrast_factor - 1.0) > 0.01:
                 try:
-                    enhancer = ImageEnhance.Contrast(pil_img)
+                    enhancer = ImageEnhance.Contrast(image_to_dither)
                     image_to_dither = enhancer.enhance(contrast_factor)
                 except Exception as e:
                     print(f"Error applying contrast: {e}")
@@ -584,58 +713,85 @@ class DitherApp(QMainWindow):
             print("Camera already active, stopping first")
             self.stop_camera()
             # Wait a moment to ensure everything is stopped
-            time.sleep(0.5)
+            time.sleep(2.0)  # Increased wait time to ensure complete camera shutdown
         
         print("Starting camera...")
         
         # Clear queue to prevent old frames
         while not self.frame_queue.empty():
             self.frame_queue.get()
+        
+        # Additional system cleanup for camera
+        try:
+            # First try to clean up any existing camera instances at the system level
+            import subprocess
+            import os
+            # Run the command without checking output, just to release resources
+            os.system("sudo pkill -f libcamera")
+            time.sleep(1)
+            print("Attempted system-level camera cleanup")
             
-        # Create and start threads if they don't exist
-        if not self.capture_thread or not self.capture_thread.isRunning():
-            if self.capture_thread:
-                del self.capture_thread  # Delete old thread if it exists but isn't running
-            self.capture_thread = CameraCaptureThread(self.frame_queue)
+            # Run garbage collection
+            import gc
+            gc.collect()
+        except Exception as e:
+            print(f"System-level cleanup failed (non-critical): {e}")
             
-        if not self.processing_thread or not self.processing_thread.isRunning():
-            if self.processing_thread:
-                del self.processing_thread  # Delete old thread if it exists but isn't running
-            self.processing_thread = FrameProcessingThread(self.frame_queue, self)
-            self.processing_thread.frameProcessed.connect(self.update_camera_frame)
+        # Always recreate threads to ensure clean state after capture
+        # This fixes the issue of camera not restarting after capture
+        if self.capture_thread:
+            del self.capture_thread  # Delete old thread
+        self.capture_thread = CameraCaptureThread(self.frame_queue)
+            
+        if self.processing_thread:
+            del self.processing_thread  # Delete old thread
+        self.processing_thread = FrameProcessingThread(self.frame_queue, self)
+        self.processing_thread.frameProcessed.connect(self.update_camera_frame)
+        
+        # Make sure threads are properly deleted
+        import gc
+        gc.collect()
+        time.sleep(0.5)
             
         # Start threads
-        if not self.capture_thread.isRunning():
-            self.capture_thread.start()
-            print("Camera capture thread started")
+        try:
+            if not self.capture_thread.isRunning():
+                self.capture_thread.start()
+                print("Camera capture thread started")
+                
+            if not self.processing_thread.isRunning():
+                self.processing_thread.start()
+                print("Frame processing thread started")
             
-        if not self.processing_thread.isRunning():
-            self.processing_thread.start()
-            print("Frame processing thread started")
-        
-        # Wait briefly to ensure threads are running
-        time.sleep(0.2)
-        
-        # Check if threads actually started
-        if not self.capture_thread.isRunning() or not self.processing_thread.isRunning():
-            print("Failed to start camera threads")
-            self.stop_camera()
-            return
+            # Wait briefly to ensure threads are running
+            time.sleep(0.5)  # Increased from 0.2 to 0.5
             
-        # Update UI
-        self.camera_button.setText("Stop Camera")
-        self.capture_button.setEnabled(True)
-        self.open_button.setEnabled(False)  # Disable file open during camera mode
-        self.camera_mode_active = True
-        
-        # Clear current image
-        self.showing_original = False
-        self.original_image = None
-        self.dithered_image = None
-        self.toggle_button.setEnabled(False)
-        
-        print("Camera mode started successfully")
-    
+            # Check if threads actually started
+            if not self.capture_thread.isRunning() or not self.processing_thread.isRunning():
+                print("Failed to start camera threads")
+                self.stop_camera()
+                return
+                
+            # Update UI
+            self.camera_button.setText("Stop Camera")
+            self.capture_button.setEnabled(True)
+            self.open_button.setEnabled(False)  # Disable file open during camera mode
+            self.camera_mode_active = True
+            
+            # Clear current image
+            self.showing_original = False
+            self.original_image = None
+            self.dithered_image = None
+            self.toggle_button.setEnabled(False)
+            
+            print("Camera mode started successfully")
+        except Exception as e:
+            print(f"Error starting camera: {e}")
+            import traceback
+            traceback.print_exc()
+            # Try to clean up on error
+            self.stop_camera()  
+            
     def stop_camera(self):
         """Stop camera capture and processing, ensuring proper synchronization"""
         print("Stopping camera...")
@@ -717,11 +873,37 @@ class DitherApp(QMainWindow):
             if frame is not None:
                 # Convert to PIL image and store
                 print(f"Captured frame shape: {frame.shape}, dtype: {frame.dtype}")
-                self.original_image = Image.fromarray(frame)
+                
+                # Convert to the appropriate mode based on the UI setting
+                if self.rgb_mode.isChecked():
+                    pil_image = Image.fromarray(frame, mode='RGB')
+                else:
+                    # Convert to grayscale if not in RGB mode
+                    gray_frame = np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140])
+                    gray_frame = gray_frame.astype(np.uint8)
+                    pil_image = Image.fromarray(gray_frame, mode='L')
+                
+                self.original_image = pil_image
                 print(f"Converted to PIL image: mode={self.original_image.mode}, size={self.original_image.size}")
                 
                 # Stop camera and apply dithering
                 self.stop_camera()
+                
+                # Force camera threads to be fully cleaned up before continuing
+                if self.capture_thread:
+                    if self.capture_thread.isRunning():
+                        print("Waiting for capture thread to finish...")
+                        self.capture_thread.wait(2000)  # Wait up to 2 seconds
+                    del self.capture_thread
+                    self.capture_thread = None
+                    
+                if self.processing_thread:
+                    if self.processing_thread.isRunning():
+                        print("Waiting for processing thread to finish...")
+                        self.processing_thread.wait(2000)  # Wait up to 2 seconds
+                    del self.processing_thread
+                    self.processing_thread = None
+                
                 self.apply_dither()
                 
                 # Enable UI elements for captured image
@@ -736,19 +918,26 @@ class DitherApp(QMainWindow):
             print(f"Error capturing frame: {e}")
             import traceback
             traceback.print_exc()
-    
+            
     def update_camera_frame(self, dithered_img):
         """Update the UI with the processed camera frame"""
         if not self.camera_mode_active:
+            print("Camera not active, frame update ignored")
             return
             
         # Display the dithered frame
-        self.display_image(dithered_img)
-        # Also keep a reference to it as the dithered image so it can be saved
-        self.dithered_image = dithered_img
-        # Enable save button for camera frames
-        self.save_button.setEnabled(True)
-    
+        if dithered_img is not None:
+            # Check image mode for debug purposes
+            print(f"Updated frame mode: {dithered_img.mode}, size: {dithered_img.size}")
+            # Display the current frame
+            self.display_image(dithered_img)
+            # Also keep a reference to it as the dithered image so it can be saved
+            self.dithered_image = dithered_img
+            # Enable save button for camera frames
+            self.save_button.setEnabled(True)
+        else:
+            print("Warning: Received None image in update_camera_frame")
+            
     def toggle_image_display(self):
         if not self.original_image or not self.dithered_image:
             return
@@ -900,9 +1089,16 @@ class DitherApp(QMainWindow):
             self.apply_dither()
     
     def rgb_changed(self):
-        if self.auto_render.isChecked():
+        """Called when the RGB checkbox state changes"""
+        print(f"RGB mode changed to: {self.rgb_mode.isChecked()}")
+        # Update camera processing immediately if in camera mode
+        if self.camera_mode_active:
+            print("Applying RGB mode change to camera feed")
+            
+        # Apply dithering to static images if auto-render is on
+        if self.auto_render.isChecked() and self.original_image is not None:
             self.apply_dither()
-    
+            
     def apply_dither(self):
         if not self.original_image:
             return
@@ -940,29 +1136,73 @@ class DitherApp(QMainWindow):
                 self.display_image(self.dithered_image)
     
     def save_image(self):
+        """Save the current dithered image to a file"""
         # Check if we have a dithered image to save (either from file or camera)
         if not self.dithered_image:
             print("No image to save")
             return
         
         try:
-            # Debug info
-            print(f"Attempting to save image: {type(self.dithered_image)}, "
+            # Debug info about the image
+            print(f"Image to save: type={type(self.dithered_image)}, "
                   f"mode={self.dithered_image.mode if hasattr(self.dithered_image, 'mode') else 'unknown'}")
             
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save Image", "", "PNG (*.png);;JPEG (*.jpg);;All Files (*.*)"
+            # Get save path with explicit file extension filters
+            path, selected_filter = QFileDialog.getSaveFileName(
+                self, "Save Image", "", 
+                "PNG Files (*.png);;JPEG Files (*.jpg);;All Files (*.*)"
             )
-            if path:
-                print(f"Saving to path: {path}")
-                # Ensure the image is in a format that can be saved
-                if hasattr(self.dithered_image, 'save'):
+            
+            # Handle case where user canceled the dialog
+            if not path:
+                print("Save canceled by user")
+                return
+            
+            # Ensure path has a valid extension
+            if not (path.lower().endswith('.png') or path.lower().endswith('.jpg') or 
+                    path.lower().endswith('.jpeg')):
+                # Default to PNG if no extension provided
+                path += '.png'
+                print(f"Added default extension: {path}")
+            
+            print(f"Saving to path: {path}")
+            
+            # Ensure the image is in a format that can be saved
+            if hasattr(self.dithered_image, 'save'):
+                # Try to save with error handling
+                try:
                     self.dithered_image.save(path)
-                    print(f"Image saved to {path}")
-                else:
-                    print(f"Error: dithered_image does not have save method: {type(self.dithered_image)}")
+                    print(f"Image saved successfully to {path}")
+                except Exception as e:
+                    print(f"Error in PIL save: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # Try alternative save method if the first fails
+                    try:
+                        # Convert to appropriate format if needed
+                        if self.dithered_image.mode not in ['RGB', 'RGBA', 'L']:
+                            save_img = self.dithered_image.convert('RGB')
+                        else:
+                            save_img = self.dithered_image
+                            
+                        # Save with a specific format
+                        if path.lower().endswith('.png'):
+                            save_img.save(path, 'PNG')
+                        elif path.lower().endswith(('.jpg', '.jpeg')):
+                            save_img.save(path, 'JPEG')
+                        else:
+                            save_img.save(path)
+                            
+                        print(f"Image saved with alternative method to {path}")
+                    except Exception as e2:
+                        print(f"Alternative save also failed: {e2}")
+            else:
+                print(f"Error: dithered_image does not have save method: {type(self.dithered_image)}")
         except Exception as e:
-            print(f"Error saving image: {e}")
+            print(f"Error in save_image: {e}")
+            import traceback
+            traceback.print_exc()
     
     def floyd_steinberg_numpy(self, pil_img, threshold=128, pixel_scale=1):
         if pixel_scale <= 0:
@@ -1069,6 +1309,29 @@ class DitherApp(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
+    # Try to ensure clean camera state at application startup
+    try:
+        import os
+        import subprocess
+        import time
+        
+        print("Cleaning up camera system at startup...")
+        # Kill any existing camera processes
+        os.system("sudo pkill -f libcamera")
+        time.sleep(1)
+        
+        # Run a quick camera capture to reset the system
+        subprocess.run(["sudo", "libcamera-still", "-t", "1", "--immediate"], 
+                       stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        time.sleep(1)
+        print("Camera system reset complete")
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+    except Exception as e:
+        print(f"Camera system cleanup at startup failed (non-critical): {e}")
+
     app = QApplication(sys.argv)
     window = DitherApp()
     window.show()
