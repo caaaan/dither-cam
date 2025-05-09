@@ -1,25 +1,118 @@
-##### Interactive dither app or as I'd like to call it,
 
 <div align="center">
-  <p style="font-size: 2em; font-weight: bold; margin-bottom: 4; font-family: 'Courier New', monospace;">Dither3000</p>
+  <p style="font-size: 2em; font-weight: bold; margin-bottom: 4; font-family: 'Courier New', monospace;">DitherCam</p>
  
 <img src="ditherer.jpeg" alt="logo" width="100" style="margin-bottom: 4; "/>
 </div>
 
-A simple desktop application built with Python and Tkinter/Pillow to apply dithering algorithms to images interactively, with controls for threshold, contrast, and pixel scale.
+# Dither-Cam: Real-time Camera Dithering for Raspberry Pi
 
-## What it does
+This application extends the original Dither3000 desktop application with real-time camera functionality for Raspberry Pi. It allows you to apply dithering algorithms to both static images and live camera feed from a Raspberry Pi camera module.
 
-*   Open common image file formats (PNG, JPG, BMP, GIF, TIFF).
-*   Display the original and dithered images side-by-side.
-*   Apply Floyd-Steinberg (error diffusion) or Simple Threshold dithering.
-*   Adjust the grayscale threshold used for dithering via a slider.
-*   Adjust the image contrast *before* dithering via a slider.
-*   Adjust the effective "pixel scale" for dithering (1 = normal, >1 = blocky effect) via a slider.
-*   Optionally enable "Auto-Render" for live updates as sliders change.
-*   Manually apply the dithering effect using a button.
-*   Save the resulting dithered image, allowing you to choose the filename and location.
-*   Image previews dynamically resize to fit the application window.
+## Features
+
+*   All the features of the original Dither3000 app:
+    * Open common image file formats (PNG, JPG, BMP, GIF, TIFF)
+    * Apply Floyd-Steinberg (error diffusion) or Simple Threshold dithering
+    * Adjust threshold, contrast, and pixel scale
+    * Save the resulting dithered images
+*   **New Camera Features:**
+    * Connect to a Raspberry Pi camera module
+    * See real-time dithering effects applied to the camera feed
+    * Capture still frames and apply dithering algorithms
+    * Switch between camera mode and static image mode
+    * Multi-threaded processing for smooth performance
+
+## Hardware Requirements
+
+* Raspberry Pi (tested on Raspberry Pi 4, but should work on Pi 3 and newer)
+* Raspberry Pi Camera Module
+* Display for Raspberry Pi
+
+## Software Dependencies
+
+* Python 3.6+
+* PyQt6 (for the GUI)
+* picamera (for Raspberry Pi camera access)
+* PIL/Pillow (for image processing)
+* NumPy (for faster array processing)
+
+## Setup for Raspberry Pi
+
+1. **Set up your Raspberry Pi with Raspberry Pi OS:**
+   * Install the latest Raspberry Pi OS
+   * Enable the camera module in `raspi-config`
+
+2. **Clone the repository:**
+   ```bash
+   git clone https://github.com/yourusername/dither-cam.git
+   cd dither-cam
+   ```
+
+3. **Install dependencies:**
+   ```bash
+   pip install PyQt6 picamera pillow numpy
+   ```
+
+4. **Run the application:**
+   ```bash
+   python main.py
+   ```
+
+## Usage
+
+### For Static Images
+1. Use the "Open Image" button to load an image
+2. Adjust dithering parameters using the sliders
+3. Click "Apply Dither" or enable "Auto-Render" for live updates
+4. Save the dithered image using "Save Image"
+
+### For Camera Feed
+1. Click "Start Camera" to enable the camera feed
+2. Adjust dithering parameters to see real-time effects
+3. Click "Capture Frame" to take a still image
+4. The captured image will be processed with the current dithering settings
+5. Save the processed image using "Save Image"
+
+## Implementation Details
+
+The application uses a three-thread architecture:
+1. **Main UI Thread**: Handles the user interface and user interactions
+2. **Camera Capture Thread**: Continuously captures frames from the camera
+3. **Frame Processing Thread**: Applies dithering algorithms to the captured frames
+
+This multi-threaded design ensures smooth performance by separating the camera I/O, image processing, and UI rendering tasks.
+
+## Building the Application
+
+To create a standalone executable that can be run without installing Python or dependencies, you can use the included `build.py` script.
+
+1. **Install PyInstaller:**
+   ```bash
+   pip install pyinstaller
+   ```
+
+2. **Run the build script:**
+   ```bash
+   python build.py
+   ```
+
+This script will create an executable in the `dist` folder.
+
+## Acknowledgments
+
+This project is based on the original [Dither3000](https://github.com/caaaan/basic-dither) application, extended with camera capabilities for Raspberry Pi.
+
+## Motivation & Future Development
+
+The original project began as a response to expensive dithering software. This extension adds real-time capabilities, making it possible to use with live camera feeds, opening up possibilities for artistic installations, vintage-style video processing, and more.
+
+Future development may include:
+* More dithering algorithms
+* Video recording capabilities
+* Hardware acceleration for better performance
+* Web interface for remote control
+* Ability to stream the processed video over a network
 
 ## Example Screenshot
 
