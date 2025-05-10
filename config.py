@@ -1,7 +1,7 @@
 #A config file to serve variables to both build.py and main.py files
 
 # --- Configuration ---
-APP_NAME = "Dither3000"
+APP_NAME = "Dithercam"
 SCRIPT_NAME = "main.py"
 ICON = "ditherer.ico" # Put your custom icon in the root directory 
 REMOVE_SPEC = True # Remove the spec file after build
