@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton,
                              QLabel, QVBoxLayout, QHBoxLayout, QComboBox, 
                              QSlider, QFileDialog, QSplitter, QCheckBox,
                              QFrame, QScrollArea)
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
 import numpy as np
 import os, config
@@ -809,8 +809,11 @@ class DitherApp(QMainWindow):
         
         # Freeze frame variables
         self.freeze_frame = None
-        self.freeze_frame_time = 0
+        self.freeze_active = False
         self.freeze_frame_duration = 2.0  # Freeze for 2 seconds
+        
+        # Setup freeze frame timer
+        self.freeze_timer = None  # Will be initialized when needed
         
         self.setup_ui()
 
@@ -1250,16 +1253,9 @@ class DitherApp(QMainWindow):
         # Ensure proper global variable access
         global FRAME_BUFFER_ORIGINAL, FRAME_BUFFER_OUTPUT
         
-        # Check if we're in freeze frame mode
-        current_time = time.time()
-        if self.freeze_frame is not None:
-            # If we're still within the freeze period, continue showing the frozen frame
-            if current_time - self.freeze_frame_time < self.freeze_frame_duration:
-                return  # Keep displaying the frozen frame
-            else:
-                # Freeze period is over, clear the freeze frame
-                self.freeze_frame = None
-                print("Freeze frame period ended, returning to live view")
+        # If freeze frame is active, don't update the display with new frames
+        if self.freeze_active:
+            return  # Skip frame updates during freeze period
             
         # Set the frame to the image viewer
         self.image_viewer.set_image(frame_array)
@@ -1290,8 +1286,24 @@ class DitherApp(QMainWindow):
             
             # Display the frozen frame
             self.image_viewer.set_image(self.freeze_frame)
-            self.freeze_frame_time = current_time
+            self.freeze_active = True
             print(f"Captured frame frozen for {self.freeze_frame_duration} seconds")
+            
+            # Use a QTimer for precise timing of the freeze duration
+            if self.freeze_timer is None:
+                self.freeze_timer = QTimer(self)
+                self.freeze_timer.setSingleShot(True)
+                self.freeze_timer.timeout.connect(self.end_freeze_frame)
+            
+            # Start the timer with exact milliseconds
+            self.freeze_timer.start(int(self.freeze_frame_duration * 1000))
+    
+    def end_freeze_frame(self):
+        """End the freeze frame period and resume live view"""
+        if self.freeze_active:
+            self.freeze_active = False
+            self.freeze_frame = None
+            print("Freeze frame period ended, returning to live view")
             
     def capture_frame(self):
         """Flag to capture and save the next frame"""
