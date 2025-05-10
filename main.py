@@ -1281,8 +1281,8 @@ class DitherApp(QMainWindow):
                 FRAME_BUFFER_ORIGINAL = np.empty_like(frame_array)
             np.copyto(FRAME_BUFFER_ORIGINAL, frame_array)
             
-            # Save FRAME_BUFFER_ORIGINAL
-            self.save_captured_image()
+            # Auto-save captured frame to /public folder with timestamp
+            self.auto_save_captured_image()
             
             # Display the frozen frame
             self.image_viewer.set_image(self.freeze_frame)
@@ -1304,7 +1304,44 @@ class DitherApp(QMainWindow):
             self.freeze_active = False
             self.freeze_frame = None
             print("Freeze frame period ended, returning to live view")
+    
+    def auto_save_captured_image(self):
+        """Auto-save captured frame to the public folder with timestamp filename"""
+        if FRAME_BUFFER_ORIGINAL is None:
+            print("No frame to save")
+            return
             
+        # Create public folder if it doesn't exist
+        import os
+        from datetime import datetime
+        
+        public_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public")
+        os.makedirs(public_folder, exist_ok=True)
+        
+        # Get file extension from config
+        file_ext = config.DEFAULT_CAPTURE_FORMAT.lower()
+        # Make sure it doesn't include a dot
+        if file_ext.startswith('.'):
+            file_ext = file_ext[1:]
+            
+        # Generate filename with current date and time
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"capture_{timestamp}.{file_ext}"
+        file_path = os.path.join(public_folder, filename)
+        
+        try:
+            # Save the image
+            from PIL import Image
+            if len(FRAME_BUFFER_ORIGINAL.shape) == 2:  # Grayscale
+                Image.fromarray(FRAME_BUFFER_ORIGINAL).save(file_path)
+            else:  # RGB
+                Image.fromarray(FRAME_BUFFER_ORIGINAL).save(file_path)
+            print(f"Image auto-saved to {file_path}")
+        except Exception as e:
+            print(f"Error auto-saving image: {e}")
+            import traceback
+            traceback.print_exc()
+
     def capture_frame(self):
         """Flag to capture and save the next frame"""
         self.capture_frame_requested = True
@@ -1535,14 +1572,6 @@ class DitherApp(QMainWindow):
         # Determine which image to save
         img_to_save = FRAME_BUFFER_ORIGINAL if self.showing_original else FRAME_BUFFER_OUTPUT
         self._save_image_to_file(img_to_save)
-        
-    def save_captured_image(self):
-        """Save the captured frame from the camera"""
-        if FRAME_BUFFER_ORIGINAL is None:
-            print("No frame to save")
-            return
-            
-        self._save_image_to_file(FRAME_BUFFER_ORIGINAL)
             
     def _save_image_to_file(self, img_to_save):
         """Common method to save an image to file with proper extension handling"""
