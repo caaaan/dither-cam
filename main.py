@@ -602,6 +602,7 @@ class CameraCaptureThread(QThread):
             
             # Store original shape for ensuring correct upscaling
             orig_shape = array_to_dither.shape
+            orig_h, orig_w = orig_shape[:2]
             
             # Apply contrast if needed - only when contrast is significantly different from 1.0
             if abs(contrast_factor - 1.0) > 0.01:
@@ -623,46 +624,70 @@ class CameraCaptureThread(QThread):
                     print(f"Error applying contrast: {e}")
                     # Continue with original array
             
-            # Fast path selection based on algorithm
-            if alg == "Floyd-Steinberg":
-                if pixel_s == 1:
+            if pixel_s == 1:
+                # Direct processing at original resolution
+                if alg == "Floyd-Steinberg":
                     # Apply dithering directly with type optimization
                     result = fs_dither(array_to_dither.astype(np.float32), mode, thr)
-                else:
-                    # Use the optimized downscale-dither-upscale pipeline
-                    # This function already handles upscaling to the original size
-                    result = downscale_dither_upscale(array_to_dither, thr, pixel_s, mode)
-            elif alg == "Simple Threshold":
-                if pixel_s == 1:
+                elif alg == "Simple Threshold":
                     # Apply simple threshold directly with minimal allocations
                     if mode == 'RGB':
                         result = simple_threshold_rgb_ps1(array_to_dither, thr)
                     else:
                         result = np.where(array_to_dither < thr, 0, 255).astype(np.uint8)
                 else:
-                    # Use block-based approach
-                    orig_h, orig_w = array_to_dither.shape[:2]
-                    result = simple_threshold_dither(array_to_dither, mode, pixel_s, orig_w, orig_h, thr)
-                    
-                    # Check if we need to upscale the result for simple_threshold_dither
-                    # Since this function might not handle upscaling internally
-                    if mode == 'RGB':
-                        if result.shape[:2] != (orig_h, orig_w):
-                            # Create output array
-                            small_h, small_w = result.shape[:2]
-                            upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
-                            # Upscale using nearest neighbor interpolation
-                            result = nearest_upscale_rgb(result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
-                    else:  # Grayscale
-                        if result.shape != (orig_h, orig_w):
-                            # Create output array
-                            small_h, small_w = result.shape
-                            upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
-                            # Upscale using nearest neighbor interpolation
-                            result = nearest_upscale_gray(result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                    result = array_to_dither  # Fallback
             else:
-                result = array_to_dither  # Fallback
-                
+                # Pixel scale > 1, we need to handle downscaling and upscaling
+                if alg == "Floyd-Steinberg":
+                    # The downscale_dither_upscale function already handles the complete pipeline
+                    result = downscale_dither_upscale(array_to_dither, thr, pixel_s, mode)
+                elif alg == "Simple Threshold":
+                    # Perform manual downscale/upscale for simple threshold
+                    
+                    # First create a downscaled version
+                    small_h = max(1, orig_h // pixel_s)
+                    small_w = max(1, orig_w // pixel_s)
+                    
+                    # Downscale using block averaging (simplified)
+                    if mode == 'RGB':
+                        # RGB block averaging
+                        small_arr = block_average_rgb(array_to_dither, small_h, small_w, orig_h, orig_w, pixel_s)
+                        
+                        # Apply threshold to downscaled image
+                        small_result = simple_threshold_rgb_ps1(small_arr, thr)
+                        
+                        # Upscale back to original size
+                        upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
+                        result = nearest_upscale_rgb(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                    else:
+                        # Grayscale block averaging
+                        small_arr = block_average_gray(array_to_dither, small_h, small_w, orig_h, orig_w, pixel_s)
+                        
+                        # Apply threshold to downscaled image
+                        small_result = np.where(small_arr < thr, 0, 255).astype(np.uint8)
+                        
+                        # Upscale back to original size
+                        upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
+                        result = nearest_upscale_gray(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                else:
+                    # Fallback with manual downscale/upscale
+                    small_h = max(1, orig_h // pixel_s)
+                    small_w = max(1, orig_w // pixel_s)
+                    
+                    if mode == 'RGB':
+                        # RGB downscale
+                        small_arr = block_average_rgb(array_to_dither, small_h, small_w, orig_h, orig_w, pixel_s)
+                        # Upscale
+                        upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
+                        result = nearest_upscale_rgb(small_arr, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                    else:
+                        # Grayscale downscale
+                        small_arr = block_average_gray(array_to_dither, small_h, small_w, orig_h, orig_w, pixel_s)
+                        # Upscale
+                        upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
+                        result = nearest_upscale_gray(small_arr, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+            
             # Ensure the result has the same shape as the original
             if mode == 'RGB' and result.shape != orig_shape:
                 print(f"Warning: Camera frame result shape {result.shape} doesn't match original {orig_shape}")
@@ -673,10 +698,28 @@ class CameraCaptureThread(QThread):
                     for c in range(3):
                         rgb_result[:,:,c] = result
                     result = rgb_result
+                    
+            # Final dimension check to ensure proper output
+            if result.shape != orig_shape and ((mode == 'RGB' and len(orig_shape) == 3) or 
+                                              (mode == 'L' and len(orig_shape) == 2)):
+                print(f"ERROR: Final result shape {result.shape} still doesn't match original {orig_shape}")
+                # Last resort: resize result to match original
+                if mode == 'RGB' and len(result.shape) == 3 and len(orig_shape) == 3:
+                    # Create a new buffer and manually copy using nearest neighbor
+                    fixed_result = np.empty(orig_shape, dtype=np.uint8)
+                    result_h, result_w = result.shape[:2]
+                    for y in range(orig_h):
+                        y_result = min(int(y * result_h / orig_h), result_h-1)
+                        for x in range(orig_w):
+                            x_result = min(int(x * result_w / orig_w), result_w-1)
+                            fixed_result[y, x] = result[y_result, x_result]
+                    result = fixed_result
                 
             return result
         except Exception as e:
             print(f"Error in process_frame_array: {e}")
+            import traceback
+            traceback.print_exc()
             return None
             
     def stop_camera(self):
@@ -1236,13 +1279,6 @@ class DitherApp(QMainWindow):
         if self.auto_render.isChecked():
             self.apply_dither()
             
-        # If we're in camera mode, try to reconfigure camera resolution
-        if self.camera_mode_active and self.capture_thread:
-            try:
-                self.capture_thread.reconfigure_resolution(value)
-            except Exception as e:
-                print(f"Error adjusting camera resolution: {e}")
-                
     def rgb_changed(self, state):
         """Handle toggling between RGB and grayscale mode"""
         if self.auto_render.isChecked():
@@ -1331,6 +1367,7 @@ class DitherApp(QMainWindow):
                 # Create a copy of the original for processing
                 work_copy = FRAME_BUFFER_ORIGINAL.copy()
                 orig_shape = work_copy.shape  # Save original shape for upscaling later
+                orig_h, orig_w = orig_shape[:2]
                 
                 # Apply contrast adjustment if needed
                 if abs(contrast_factor - 1.0) > 0.01:
@@ -1338,54 +1375,70 @@ class DitherApp(QMainWindow):
                     work_copy = 128 + contrast_factor * (work_copy - 128)
                     work_copy = np.clip(work_copy, 0, 255).astype(np.uint8)
                 
-                # Apply dithering based on mode
-                if self.rgb_mode.isChecked():
-                    # Process for RGB mode
-                    if alg == "Floyd-Steinberg":
-                        if pixel_s == 1:
+                # Apply dithering based on mode and pixel scale
+                if pixel_s == 1:
+                    # Process at original resolution
+                    if self.rgb_mode.isChecked():
+                        # Process for RGB mode
+                        if alg == "Floyd-Steinberg":
                             result = fs_dither(work_copy.astype(np.float32), 'RGB', thr)
-                        else:
-                            # The downscale_dither_upscale function already handles upscaling
-                            result = downscale_dither_upscale(work_copy, thr, pixel_s, 'RGB')
-                    else:  # Simple Threshold
-                        if pixel_s == 1:
+                        else:  # Simple Threshold
                             result = simple_threshold_rgb_ps1(work_copy, thr)
-                        else:
-                            orig_h, orig_w = work_copy.shape[:2]
-                            result = simple_threshold_dither(work_copy, 'RGB', pixel_s, orig_w, orig_h, thr)
-                            
-                            # Check if we need to upscale the result
-                            if result.shape[:2] != (orig_h, orig_w):
-                                # Create output array
-                                small_h, small_w = result.shape[:2]
-                                upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
-                                # Upscale using nearest neighbor interpolation
-                                result = nearest_upscale_rgb(result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
-                else:
-                    # Process for Grayscale
-                    # Convert to grayscale first
-                    gray = np.dot(work_copy[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
-                    orig_h, orig_w = gray.shape
-                    
-                    if alg == "Floyd-Steinberg":
-                        if pixel_s == 1:
+                    else:
+                        # Process for Grayscale
+                        # Convert to grayscale first
+                        gray = np.dot(work_copy[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                        
+                        if alg == "Floyd-Steinberg":
                             result = fs_dither(gray.astype(np.float32), 'L', thr)
-                        else:
-                            # The downscale_dither_upscale function already handles upscaling
-                            result = downscale_dither_upscale(gray, thr, pixel_s, 'L')
-                    else:  # Simple Threshold
-                        if pixel_s == 1:
+                        else:  # Simple Threshold
                             result = np.where(gray < thr, 0, 255).astype(np.uint8)
-                        else:
-                            result = simple_threshold_dither(gray, 'L', pixel_s, orig_w, orig_h, thr)
+                else:
+                    # Process with downscaling and upscaling for pixel_s > 1
+                    if self.rgb_mode.isChecked():
+                        # RGB mode
+                        if alg == "Floyd-Steinberg":
+                            # This function already handles the complete pipeline
+                            result = downscale_dither_upscale(work_copy, thr, pixel_s, 'RGB')
+                        else:  # Simple Threshold
+                            # Manual downscale and upscale
+                            # First determine size of downscaled image
+                            small_h = max(1, orig_h // pixel_s)
+                            small_w = max(1, orig_w // pixel_s)
                             
-                            # Check if we need to upscale the result
-                            if result.shape != (orig_h, orig_w):
-                                # Create output array
-                                small_h, small_w = result.shape
-                                upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
-                                # Upscale using nearest neighbor interpolation
-                                result = nearest_upscale_gray(result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                            # Perform block averaging for downscaling
+                            small_arr = block_average_rgb(work_copy, small_h, small_w, orig_h, orig_w, pixel_s)
+                            
+                            # Apply threshold to downscaled image
+                            small_result = simple_threshold_rgb_ps1(small_arr, thr)
+                            
+                            # Upscale back to original size
+                            upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
+                            result = nearest_upscale_rgb(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                    else:
+                        # Grayscale mode
+                        # Convert to grayscale first
+                        gray = np.dot(work_copy[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                        orig_h, orig_w = gray.shape
+                        
+                        if alg == "Floyd-Steinberg":
+                            # This function already handles the complete pipeline
+                            result = downscale_dither_upscale(gray, thr, pixel_s, 'L')
+                        else:  # Simple Threshold
+                            # Manual downscale and upscale
+                            # First determine size of downscaled image
+                            small_h = max(1, orig_h // pixel_s)
+                            small_w = max(1, orig_w // pixel_s)
+                            
+                            # Perform block averaging for downscaling
+                            small_arr = block_average_gray(gray, small_h, small_w, orig_h, orig_w, pixel_s)
+                            
+                            # Apply threshold to downscaled image
+                            small_result = np.where(small_arr < thr, 0, 255).astype(np.uint8)
+                            
+                            # Upscale back to original size
+                            upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
+                            result = nearest_upscale_gray(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                 
                 # Ensure the result has the same shape as the original
                 if self.rgb_mode.isChecked() and result.shape != orig_shape:
