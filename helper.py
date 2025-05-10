@@ -1,6 +1,5 @@
 from numba import njit, prange
 import numpy as np
-from PIL import Image
 
 @njit
 def fs_dither_rgb(img_array, threshold=128):
@@ -613,25 +612,3 @@ def optimized_pass_through(array, out_buffer=None):
     else:
         # Just make a clean copy if no buffer available
         return array.copy()
-
-def bgr_array_to_pil(bgr_array):
-    """
-    Create a PIL Image directly from BGR array data without converting the entire array.
-    This is more efficient than converting BGR->RGB->PIL when we just need to display the image.
-    """
-    # Create a PIL image with channels in reversed order
-    # BGR array -> PIL Image with RGB format (reversed channels)
-    height, width, _ = bgr_array.shape
-    
-    # Create the RGB image by reordering the channels during PIL image creation
-    # This avoids creating an entirely new array
-    # PIL expects RGB format, so we swap the channel order
-    pil_img = Image.frombytes(
-        'RGB', 
-        (width, height), 
-        bgr_array.tobytes(), 
-        'raw', 
-        'BGR'  # Tell PIL these bytes are in BGR order
-    )
-    
-    return pil_img

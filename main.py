@@ -8,13 +8,12 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton,
                              QFrame, QScrollArea)
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QThread
 from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
-from PIL import Image, ImageEnhance
 import numpy as np
 import os, config
 from helper import (fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither, 
                    block_average_rgb, block_average_gray, nearest_upscale_rgb, 
                    nearest_upscale_gray, downscale_dither_upscale, bgr_to_rgb, 
-                   optimized_pass_through, bgr_array_to_pil)
+                   optimized_pass_through)
 
 # Try to import picamera only if available (for development on non-Pi platforms)
 try:
@@ -25,7 +24,7 @@ except ImportError:
     print("Warning: picamera module not available. Camera features will be disabled.")
 
 class CameraCaptureThread(QThread):
-    frameProcessed = pyqtSignal(Image.Image)  # Emit processed frames directly
+    frameProcessed = pyqtSignal(np.ndarray)  # Emit processed frames directly
 
     def __init__(self, app_instance):
         super().__init__()
@@ -349,7 +348,7 @@ class CameraCaptureThread(QThread):
                             if frames_captured % 30 == 0:  # Only log occasionally to avoid overwhelming output
                                 print(f"Pass-through processing time: {pt_time:.3f}ms")
                             
-                            self.frameProcessed.emit(pil_result)
+                            self.frameProcessed.emit(frame)
                         elif self.app.rgb_mode.isChecked():
                             # RGB mode
                             processed_array = self.process_frame_array(self.frame_buffer, 'RGB')
@@ -539,7 +538,7 @@ class CameraCaptureThread(QThread):
         self.stop_camera()  # Stop the camera right away
 
 class FrameProcessingThread(QThread):
-    frameProcessed = pyqtSignal(Image.Image)
+    frameProcessed = pyqtSignal(np.ndarray)
 
     def __init__(self, frame_queue, app_instance):
         super().__init__()
@@ -608,7 +607,7 @@ class FrameProcessingThread(QThread):
                             
                             # Emit processed frame - only if we're still running
                             if self.is_running:
-                                self.frameProcessed.emit(pil_result)
+                                self.frameProcessed.emit(frame)
                         else:
                             # Convert to grayscale directly in NumPy if needed
                             if not self.app.rgb_mode.isChecked():
@@ -667,51 +666,6 @@ class FrameProcessingThread(QThread):
                 last_report_time = current_time
         
         print("Processing thread stopped")
-
-    def process_frame(self, pil_img):
-        """Apply dithering to a frame based on current app settings"""
-        try:
-            # Get current settings from main app
-            alg = self.app.algorithm_combo.currentText()
-            thr = self.app.threshold_slider.value()
-            contrast_factor = self.app.contrast_slider.value() / 100.0
-            pixel_s = self.app.scale_slider.value()
-            use_rgb = self.app.rgb_mode.isChecked()
-            
-            # Prepare the image format as needed
-            if use_rgb and pil_img.mode != 'RGB':
-                # Convert to RGB format
-                image_to_dither = pil_img.convert('RGB')
-            elif not use_rgb and pil_img.mode != 'L':
-                # Convert to grayscale format
-                image_to_dither = pil_img.convert('L')
-            else:
-                # Already in the right format
-                image_to_dither = pil_img
-            
-            # Apply contrast if needed
-            if abs(contrast_factor - 1.0) > 0.01:
-                try:
-                    enhancer = ImageEnhance.Contrast(image_to_dither)
-                    image_to_dither = enhancer.enhance(contrast_factor)
-                except Exception as e:
-                    print(f"Error applying contrast: {e}")
-                    # Continue with original image
-            
-            # Apply selected dithering algorithm
-            if alg == "Floyd-Steinberg":
-                result = self.app.floyd_steinberg_numpy(image_to_dither, thr, pixel_s)
-            elif alg == "Simple Threshold":
-                result = self.app.simple_threshold(image_to_dither, thr, pixel_s)
-            else:
-                result = image_to_dither  # Fallback
-                
-            return result
-        except Exception as e:
-            print(f"Error in process_frame: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
     def process_frame_array(self, array, mode):
         """Apply dithering directly to a NumPy array based on current app settings"""
@@ -808,12 +762,44 @@ class ImageViewer(QScrollArea):
         
         self.setWidget(self.image_label)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         
         self.original_pixmap = None
         self.zoom_factor = 1.0
         self.min_zoom = 0.1
         self.max_zoom = 5.0
+
+        # Buffer for direct memory access
+        self.qimage_buffer = None
+        self.pixmap_buffer = None
+        self.current_format = None
+        self.current_size = None
+
+    def update_frame(self, frame_array):
+        """Efficiently update the display with a NumPy array (RGB or grayscale)."""
+        import numpy as np
+        from PyQt6.QtGui import QImage, QPixmap
+        # Determine format
+        if frame_array.ndim == 3 and frame_array.shape[2] == 3:
+            fmt = QImage.Format.Format_RGB888
+            bytes_per_line = frame_array.shape[1] * 3
+        elif frame_array.ndim == 2:
+            fmt = QImage.Format.Format_Grayscale8
+            bytes_per_line = frame_array.shape[1]
+        else:
+            raise ValueError("Unsupported frame shape for update_frame: {}".format(frame_array.shape))
+        size = (frame_array.shape[1], frame_array.shape[0])
+        # Only recreate QImage if size or format changes
+        if self.qimage_buffer is None or self.current_format != fmt or self.current_size != size:
+            self.qimage_buffer = QImage(frame_array.data, size[0], size[1], bytes_per_line, fmt)
+            self.current_format = fmt
+            self.current_size = size
+        else:
+            # Update buffer data in-place if possible
+            self.qimage_buffer = QImage(frame_array.data, size[0], size[1], bytes_per_line, fmt)
+        # Convert to QPixmap
+        self.pixmap_buffer = QPixmap.fromImage(self.qimage_buffer)
+        self.set_image(self.pixmap_buffer)
 
     def _apply_zoom_to_display(self):
         """Scales original_pixmap by zoom_factor and updates the label."""
@@ -1305,67 +1291,58 @@ class DitherApp(QMainWindow):
         if not self.camera_mode_active:
             print("Camera not active, frame update ignored")
             return
-            
+        import numpy as np
+        # If dithered_img is a PIL Image, convert to NumPy array
+        try:
+            from PIL import Image
+            if isinstance(dithered_img, Image.Image):
+                if dithered_img.mode == "RGB" or dithered_img.mode == "L":
+                    dithered_img = np.array(dithered_img)
+                else:
+                    dithered_img = np.array(dithered_img.convert("RGB"))
+        except Exception as e:
+            print(f"update_camera_frame: Could not convert PIL image to array: {e}")
+            self.image_viewer.set_image(None)
+            return
         # Display the dithered frame
         if dithered_img is not None:
             # Check if we need to capture this frame
             if self.capture_frame_requested:
-                # Save this frame as the captured image
                 print("Captured frame received")
                 self.capture_frame_requested = False  # Reset flag
-                
-                # Store the processed frame as the original image
-                self.original_image = dithered_img.copy()
-                
-                # Store as numpy array for future processing if needed
-                if dithered_img.mode == 'RGB':
-                    self.original_array = np.array(dithered_img)
-                else:
-                    self.original_array = np.array(dithered_img)
-                
-                print(f"Frame captured: mode={dithered_img.mode}, size={dithered_img.size}")
-                
-                # Stop camera completely
+                self.original_image = dithered_img.copy() if isinstance(dithered_img, np.ndarray) else None
+                self.original_array = dithered_img if isinstance(dithered_img, np.ndarray) else None
+                print(f"Frame captured: array shape={getattr(dithered_img, 'shape', None)}")
                 print("Stopping camera after frame capture...")
                 self.stop_camera()
-                
-                # Add additional system-level cleanup
                 try:
                     print("Performing additional system-level cleanup...")
                     import os
                     import time
-                    
-                    # Kill camera processes
                     os.system("sudo pkill -f libcamera")
                     time.sleep(2.0)
-                    
-                    # Force garbage collection
                     import gc
                     gc.collect()
                     time.sleep(1.0)
                 except Exception as e:
                     print(f"Additional cleanup error (non-critical): {e}")
-                
-                # Apply dithering directly to the captured frame
                 print("Applying dithering to captured frame...")
                 self.apply_dither_to_array()
-                
-                # Enable UI elements for captured image
-                if self.dithered_image:
+                if self.dithered_image is not None:
                     self.save_button.setEnabled(True)
                     self.toggle_button.setEnabled(True)
                     print("Dithering applied successfully")
                 else:
                     print("Failed to apply dithering to captured frame")
-                
-                return  # Done with capture, no need to update display
-            
+                return
             # For normal camera display, update the display
-            self.display_image(dithered_img)
-            # Also keep a reference to it as the dithered image so it can be saved
-            self.dithered_image = dithered_img
-            # Enable save button for camera frames
-            self.save_button.setEnabled(True)
+            if isinstance(dithered_img, np.ndarray):
+                self.image_viewer.update_frame(dithered_img)
+                self.dithered_image = dithered_img
+                self.save_button.setEnabled(True)
+            else:
+                print("update_camera_frame: Unsupported image type for display.")
+                self.image_viewer.set_image(None)
         else:
             print("Warning: Received None image in update_camera_frame")
     
@@ -1442,65 +1419,26 @@ class DitherApp(QMainWindow):
             self.toggle_button.setEnabled(False)
             self.showing_original = False # Reset for next attempt
     
-    def display_image(self, pil_image, is_bgr_data=False):
-        if not pil_image:
-            self.image_viewer.set_image(None) # set_image(None) handles zoom reset
+    def display_image(self, image, is_bgr_data=False):
+        import numpy as np
+        # If input is a PIL Image, convert to NumPy array
+        try:
+            from PIL import Image
+            if isinstance(image, Image.Image):
+                if image.mode == "RGB" or image.mode == "L":
+                    image = np.array(image)
+                else:
+                    image = np.array(image.convert("RGB"))
+        except Exception as e:
+            print(f"display_image: Could not convert PIL image to array: {e}")
+            self.image_viewer.set_image(None)
             return
-        
-        # Make sure we have a copy to avoid modifying the original
-        img_copy = pil_image.copy()
-        
-        # Debug print to verify image format and size
-        print(f"Displaying image: mode={img_copy.mode}, size={img_copy.size}")
-        
-        # Convert PIL image to QPixmap at original size
-        if img_copy.mode == "RGB":
-            # RGB mode - direct conversion
-            img_data = img_copy.tobytes()
-            q_image = QImage(
-                img_data, 
-                img_copy.width, 
-                img_copy.height, 
-                img_copy.width * 3, 
-                QImage.Format.Format_RGB888
-            )
-        elif img_copy.mode == "L":
-            # Grayscale mode - direct conversion
-            img_data = img_copy.tobytes()
-            q_image = QImage(
-                img_data, 
-                img_copy.width, 
-                img_copy.height, 
-                img_copy.width, 
-                QImage.Format.Format_Grayscale8
-            )
+        # Only handle NumPy arrays from here
+        if isinstance(image, np.ndarray):
+            self.image_viewer.update_frame(image)
         else:
-            # All other modes including RGBA, P, etc. - convert to RGB
-            try:
-                img_copy = img_copy.convert("RGB")
-                img_data = img_copy.tobytes()
-                q_image = QImage(
-                    img_data, 
-                    img_copy.width, 
-                    img_copy.height, 
-                    img_copy.width * 3, 
-                    QImage.Format.Format_RGB888
-                )
-            except Exception as e:
-                print(f"Could not convert image mode {img_copy.mode} to RGB: {e}")
-                self.image_viewer.set_image(None)
-                return
-        
-        # Debug print to verify QImage creation
-        print(f"Created QImage: {q_image.width()}x{q_image.height()}, format={q_image.format()}")
-        
-        pixmap = QPixmap.fromImage(q_image)
-        if pixmap.isNull():
-            print("Error: Created QPixmap is null")
-        else:
-            print(f"Created QPixmap: {pixmap.width()}x{pixmap.height()}")
-            
-        self.image_viewer.set_image(pixmap)
+            print("display_image: Unsupported image type for display.")
+            self.image_viewer.set_image(None)
     
     def threshold_changed(self, value):
         self.threshold_label.setText(f"Threshold: {value}")
@@ -1652,63 +1590,41 @@ class DitherApp(QMainWindow):
             import traceback
             traceback.print_exc()
     
-    def floyd_steinberg_numpy(self, pil_img, threshold=128, pixel_scale=1):
+    def floyd_steinberg_numpy(self, array, threshold=128, pixel_scale=1):
         if pixel_scale <= 0:
             pixel_scale = 1
-        
         if self.rgb_mode.isChecked():
             mode = 'RGB'
         else:
             mode = 'L'
-        
         if pixel_scale == 1:
-            # Convert PIL to numpy array once
-            arr = np.array(pil_img.convert(mode), dtype=np.float32)
-            # Process the array directly
-            arr = fs_dither(arr, mode, threshold)    
-            
-            # Only convert back to PIL at the end
-            return Image.fromarray(arr)
+            arr = array.astype(np.float32)
+            arr = fs_dither(arr, mode, threshold)
+            return arr.astype(np.uint8)
         else:
-            # Use the optimized downscale-dither-upscale pipeline
-            # Convert PIL to numpy array
-            arr = np.array(pil_img.convert(mode))
-            
-            # Process using the optimized function
+            arr = array.astype(np.uint8)
             result_arr = downscale_dither_upscale(arr, threshold, pixel_scale, mode)
-            
-            # Convert the result back to PIL image
-            return Image.fromarray(result_arr)
+            return result_arr
     
-    def simple_threshold(self, pil_img, threshold=128, pixel_scale=1):
+    def simple_threshold(self, array, threshold=128, pixel_scale=1):
         if pixel_scale <= 0:
             pixel_scale = 1
-        
         if self.rgb_mode.isChecked():
             type = 'RGB'
         else:
             type = 'L'
-        
-        # Convert to NumPy array once
-        img_array = np.array(pil_img.convert(type))
-        
+        img_array = array.astype(np.uint8)
         if pixel_scale == 1:
             if type == 'RGB':
-                # Process directly on NumPy array
                 result = simple_threshold_rgb_ps1(img_array, threshold)
-                return Image.fromarray(result.astype(np.uint8))
+                return result.astype(np.uint8)
             else:
-                # For grayscale, use NumPy for threshold instead of PIL's point
                 result = np.where(img_array < threshold, 0, 255).astype(np.uint8)
-                return Image.fromarray(result)
+                return result
         else:
-            # For larger pixel scales, use the block-based approach directly on arrays
-            orig_w, orig_h = pil_img.size
-            
-            # Create output array from the input array
+            orig_h, orig_w = img_array.shape[:2]
             out_array = simple_threshold_dither(img_array, type, pixel_scale, orig_w, orig_h, threshold)
-            
-            return Image.fromarray(out_array)
+            return out_array
 
     def handle_zoom_slider_change(self, value):
         zoom_level = value / 100.0  # Convert slider value (10-500) to factor (0.1-5.0)
