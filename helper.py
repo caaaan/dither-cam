@@ -242,8 +242,8 @@ def simple_threshold_greyscale_psMore(img_array, pixel_scale, orig_w, orig_h, th
     return out_array
 
 @njit(parallel=True)
-def simple_threshold_rgb_psMore(img_array, pixel_scale, orig_w, orig_h, threshold=128):
-    """Optimized threshold for RGB images with pixel scale > 1"""
+def _simple_threshold_rgb_psMore(img_array, pixel_scale, orig_w, orig_h, threshold=128):
+    """Optimized threshold for RGB images with pixel scale > 1 - internal implementation"""
     # For small images, use a simpler approach
     if orig_h * orig_w < 10000:
         out_array = np.zeros((orig_h, orig_w, 3), dtype=np.uint8)
@@ -304,6 +304,18 @@ def simple_threshold_rgb_psMore(img_array, pixel_scale, orig_w, orig_h, threshol
                 out_array[y0:y1, x0:x1, c] = block_color[c]
     
     return out_array
+
+def simple_threshold_rgb_psMore(img_array, pixel_scale, orig_w, orig_h, threshold=128):
+    """Wrapper function that ensures img_array is 3D before passing to JIT-compiled function"""
+    # Check dimensions and convert if needed
+    if len(img_array.shape) != 3:
+        # Create a 3D array from the 2D grayscale (outside the JIT compiled function)
+        print(f"Converting 2D grayscale array of shape {img_array.shape} to 3D for RGB processing")
+        img_array_3d = np.stack([img_array] * 3, axis=-1)
+        return _simple_threshold_rgb_psMore(img_array_3d, pixel_scale, orig_w, orig_h, threshold)
+    else:
+        # Already 3D, pass through to JIT function
+        return _simple_threshold_rgb_psMore(img_array, pixel_scale, orig_w, orig_h, threshold)
 
 def simple_threshold_dither(arr, type, pixel_scale, orig_w, orig_h, threshold=128):
     """Direct thresholding with specified pixel scale"""
