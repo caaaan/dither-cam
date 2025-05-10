@@ -807,7 +807,7 @@ class ImageViewer(QScrollArea):
         
         self.setWidget(self.image_label)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
         self.original_pixmap = None
         self.zoom_factor = 1.0
