@@ -807,6 +807,11 @@ class DitherApp(QMainWindow):
         # Flag for frame capture
         self.capture_frame_requested = False
         
+        # Freeze frame variables
+        self.freeze_frame = None
+        self.freeze_frame_time = 0
+        self.freeze_frame_duration = 2.0  # Freeze for 2 seconds
+        
         self.setup_ui()
 
     def stop_camera(self):
@@ -1241,6 +1246,17 @@ class DitherApp(QMainWindow):
         """Update the image display with camera frame"""
         if not self.camera_mode_active:
             return  # Ignore frames if camera is no longer active
+        
+        # Check if we're in freeze frame mode
+        current_time = time.time()
+        if self.freeze_frame is not None:
+            # If we're still within the freeze period, continue showing the frozen frame
+            if current_time - self.freeze_frame_time < self.freeze_frame_duration:
+                return  # Keep displaying the frozen frame
+            else:
+                # Freeze period is over, clear the freeze frame
+                self.freeze_frame = None
+                print("Freeze frame period ended, returning to live view")
             
         # Set the frame to the image viewer
         self.image_viewer.set_image(frame_array)
@@ -1253,7 +1269,28 @@ class DitherApp(QMainWindow):
         # Check if capture was requested
         if self.capture_frame_requested:
             self.capture_frame_requested = False
-            self.save_image()  # Save the current frame
+            
+            # Store the current frame as the freeze frame
+            if self.showing_original and FRAME_BUFFER_ORIGINAL is not None:
+                self.freeze_frame = FRAME_BUFFER_ORIGINAL.copy()
+            elif FRAME_BUFFER_OUTPUT is not None:
+                self.freeze_frame = FRAME_BUFFER_OUTPUT.copy()
+            else:
+                self.freeze_frame = frame_array.copy()
+                
+            # Save the current captured frame as FRAME_BUFFER_ORIGINAL
+            global FRAME_BUFFER_ORIGINAL
+            if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != frame_array.shape:
+                FRAME_BUFFER_ORIGINAL = np.empty_like(frame_array)
+            np.copyto(FRAME_BUFFER_ORIGINAL, frame_array)
+            
+            # Save FRAME_BUFFER_ORIGINAL
+            self.save_captured_image()
+            
+            # Display the frozen frame
+            self.image_viewer.set_image(self.freeze_frame)
+            self.freeze_frame_time = current_time
+            print(f"Captured frame frozen for {self.freeze_frame_duration} seconds")
             
     def capture_frame(self):
         """Flag to capture and save the next frame"""
@@ -1482,39 +1519,60 @@ class DitherApp(QMainWindow):
         if not self.showing_original and FRAME_BUFFER_OUTPUT is None:
             return
             
+        # Determine which image to save
+        img_to_save = FRAME_BUFFER_ORIGINAL if self.showing_original else FRAME_BUFFER_OUTPUT
+        self._save_image_to_file(img_to_save)
+        
+    def save_captured_image(self):
+        """Save the captured frame from the camera"""
+        if FRAME_BUFFER_ORIGINAL is None:
+            print("No frame to save")
+            return
+            
+        self._save_image_to_file(FRAME_BUFFER_ORIGINAL)
+            
+    def _save_image_to_file(self, img_to_save):
+        """Common method to save an image to file with proper extension handling"""
         options = QFileDialog.Option.ReadOnly
-        file_path, _ = QFileDialog.getSaveFileName(
+        file_path, selected_filter = QFileDialog.getSaveFileName(
             self, "Save Image", "", 
             "PNG Files (*.png);;JPEG Files (*.jpg);;All Files (*)", 
             options=options
         )
         
-        if file_path:
+        if not file_path:
+            return
+            
+        # Ensure file has the correct extension based on selected filter
+        if selected_filter == "PNG Files (*.png)" and not file_path.lower().endswith('.png'):
+            file_path += '.png'
+        elif selected_filter == "JPEG Files (*.jpg)" and not file_path.lower().endswith(('.jpg', '.jpeg')):
+            file_path += '.jpg'
+            
+        try:
+            # Use PIL to save the image (more reliable than OpenCV for this case)
             try:
-                # Determine which image to save
-                img_to_save = FRAME_BUFFER_ORIGINAL if self.showing_original else FRAME_BUFFER_OUTPUT
-                
-                # Use OpenCV to save if available
-                try:
-                    import cv2
-                    # Convert from RGB to BGR for OpenCV
-                    img_to_save_bgr = img_to_save.copy()
-                    if len(img_to_save.shape) == 3 and img_to_save.shape[2] == 3:
-                        img_to_save_bgr = img_to_save_bgr[:, :, ::-1]
-                    cv2.imwrite(file_path, img_to_save_bgr)
-                except ImportError:
-                    # Fall back to PIL
-                    from PIL import Image
-                    if len(img_to_save.shape) == 2:  # Grayscale
-                        Image.fromarray(img_to_save).save(file_path)
-                    else:  # RGB
-                        Image.fromarray(img_to_save).save(file_path)
-                        
+                from PIL import Image
+                if len(img_to_save.shape) == 2:  # Grayscale
+                    Image.fromarray(img_to_save).save(file_path)
+                else:  # RGB
+                    Image.fromarray(img_to_save).save(file_path)
                 print(f"Image saved to {file_path}")
-            except Exception as e:
-                print(f"Error saving image: {e}")
-                import traceback
-                traceback.print_exc()
+            except ImportError:
+                # Fall back to OpenCV if PIL is not available
+                import cv2
+                # Convert from RGB to BGR for OpenCV
+                img_to_save_bgr = img_to_save.copy()
+                if len(img_to_save.shape) == 3 and img_to_save.shape[2] == 3:
+                    img_to_save_bgr = img_to_save_bgr[:, :, ::-1]
+                success = cv2.imwrite(file_path, img_to_save_bgr)
+                if not success:
+                    raise RuntimeError(f"OpenCV failed to save image to {file_path}")
+                print(f"Image saved to {file_path} using OpenCV")
+        except Exception as e:
+            print(f"Error saving image: {e}")
+            import traceback
+            traceback.print_exc()
 
 def main():
     """Main application entry point with initialization of global frame buffers"""
