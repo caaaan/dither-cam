@@ -327,7 +327,7 @@ class CameraCaptureThread(QThread):
                         # For non-pass-through mode, convert BGR to RGB as before 
                         if not self.app.pass_through_mode.isChecked():
                             # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
-                            frame = bgr_to_rgb(frame)
+                            #frame = bgr_to_rgb(frame)
                             
                             # Reuse buffer if possible
                             if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
@@ -588,9 +588,9 @@ class FrameProcessingThread(QThread):
                 if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
                     try:
                         # For non-pass-through mode, convert BGR to RGB as before
-                        if not self.app.pass_through_mode.isChecked():
+                        #if not self.app.pass_through_mode.isChecked():
                             # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
-                            frame = bgr_to_rgb(frame)
+                        frame = bgr_to_rgb(frame)
                         
                         # Check if pass-through mode is enabled
                         if self.app.pass_through_mode.isChecked():
@@ -1422,39 +1422,25 @@ class DitherApp(QMainWindow):
     
     def display_image(self, image, is_bgr_data=False):
         import numpy as np
-        
-        if image is None:
-            self.image_viewer.set_image(None)
-            return
-        
-        # Make sure we're dealing with a NumPy array
-        if not isinstance(image, np.ndarray):
-            print(f"display_image: Image is not a NumPy array, type={type(image)}")
-            self.image_viewer.set_image(None)
-            return
-        
-        # Convert BGR to RGB if needed
-        if is_bgr_data and len(image.shape) == 3 and image.shape[2] == 3:
-            # Use BGR to RGB conversion
-            try:
-                if 'cv2' in sys.modules:
-                    # Use OpenCV if available
-                    import cv2
-                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                else:
-                    # Use our helper function
-                    image = bgr_to_rgb(image)
-            except Exception as e:
-                print(f"Error converting BGR to RGB: {e}")
-        
-        # Update the image viewer with the NumPy array
+        # If input is a PIL Image, convert to NumPy array
         try:
-            self.image_viewer.update_frame(image)
+            from PIL import Image
+            if isinstance(image, Image.Image):
+                if image.mode == "RGB" or image.mode == "L":
+                    image = np.array(image)
+                else:
+                    image = np.array(image.convert("RGB"))
         except Exception as e:
-            print(f"Error updating image viewer: {e}")
-            traceback.print_exc()
+            print(f"display_image: Could not convert PIL image to array: {e}")
             self.image_viewer.set_image(None)
-
+            return
+            # Only handle NumPy arrays from here
+            if isinstance(image, np.ndarray):
+                self.image_viewer.update_frame(image)
+            else:
+                print("display_image: Unsupported image type for display.")
+                self.image_viewer.set_image(None)
+    
     def threshold_changed(self, value):
         self.threshold_label.setText(f"Threshold: {value}")
         if self.auto_render.isChecked():
