@@ -7,7 +7,7 @@ ICON = "ditherer.ico" # Put your custom icon in the root directory
 REMOVE_SPEC = True # Remove the spec file after build
 
 # Camera configuration
-CAMERA_SAFE_INIT = True  # Set to False to skip extensive camera initialization checks
+CAMERA_SAFE_INIT = False  # Set to False to skip extensive camera initialization checks
 
 pyinstaller_cmd = [      # Base PyInstaller command
     "pyinstaller",
