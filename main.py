@@ -1542,14 +1542,21 @@ class DitherApp(QMainWindow):
         if FRAME_BUFFER_PROCESSING is not None:
             alg = self.algorithm_combo.currentText()
             
-            if alg == "Floyd-Steinberg":
-                # Float32 for Floyd-Steinberg
-                SHARED_ALGORITHM_BUFFER = np.empty_like(FRAME_BUFFER_PROCESSING, dtype=np.float32)
-                print("Pre-allocated float32 buffer for Floyd-Steinberg")
-            else:
-                # Uint8 for Simple Threshold
-                SHARED_ALGORITHM_BUFFER = np.empty_like(FRAME_BUFFER_PROCESSING, dtype=np.uint8)
-                print("Pre-allocated uint8 buffer for Simple Threshold")
+            # Check if we're in RGB or grayscale mode to create the correct shape
+            is_rgb = self.rgb_mode.isChecked()
+            
+            try:
+                if alg == "Floyd-Steinberg":
+                    # Float32 for Floyd-Steinberg
+                    SHARED_ALGORITHM_BUFFER = np.empty_like(FRAME_BUFFER_PROCESSING, dtype=np.float32)
+                    print(f"Pre-allocated float32 buffer for Floyd-Steinberg, shape={SHARED_ALGORITHM_BUFFER.shape}")
+                else:
+                    # Uint8 for Simple Threshold
+                    SHARED_ALGORITHM_BUFFER = np.empty_like(FRAME_BUFFER_PROCESSING, dtype=np.uint8)
+                    print(f"Pre-allocated uint8 buffer for Simple Threshold, shape={SHARED_ALGORITHM_BUFFER.shape}")
+            except Exception as e:
+                print(f"Warning: Failed to pre-allocate buffer: {e}, will create on demand")
+                SHARED_ALGORITHM_BUFFER = None
         
         # Continue with render if auto-render is on
         if self.auto_render.isChecked():
@@ -1558,6 +1565,15 @@ class DitherApp(QMainWindow):
     def rgb_changed(self):
         """Called when the RGB checkbox state changes"""
         print(f"RGB mode changed to: {self.rgb_mode.isChecked()}")
+        
+        # Reset the shared algorithm buffer when switching modes to force recreation with correct shape
+        global SHARED_ALGORITHM_BUFFER
+        SHARED_ALGORITHM_BUFFER = None
+        
+        # Also reset the processing buffer to ensure the shape is correct
+        global FRAME_BUFFER_PROCESSING
+        FRAME_BUFFER_PROCESSING = None
+        
         # Update camera processing immediately if in camera mode
         if self.camera_mode_active:
             print("Applying RGB mode change to camera feed")
@@ -1572,6 +1588,7 @@ class DitherApp(QMainWindow):
         global FRAME_BUFFER_ORIGINAL
         global FRAME_BUFFER_PROCESSING
         global FRAME_BUFFER_OUTPUT
+        global FRAME_BUFFER_GRAYSCALE
         
         # Original array is stored in the global buffer
         if FRAME_BUFFER_ORIGINAL is None:
@@ -1597,12 +1614,36 @@ class DitherApp(QMainWindow):
         
         print(f"Applying {alg} with threshold {thr}, contrast {contrast_factor:.2f}, scale {pixel_s}")
         
-        # Reuse the global processing buffer
-        if FRAME_BUFFER_PROCESSING is None or FRAME_BUFFER_PROCESSING.shape != FRAME_BUFFER_ORIGINAL.shape:
-            FRAME_BUFFER_PROCESSING = np.empty_like(FRAME_BUFFER_ORIGINAL)
+        # Check if we need to convert between RGB and grayscale
+        needs_grayscale = not self.rgb_mode.isChecked()
+        is_currently_grayscale = (len(FRAME_BUFFER_ORIGINAL.shape) == 2)
         
-        # Copy original data to work buffer
-        np.copyto(FRAME_BUFFER_PROCESSING, FRAME_BUFFER_ORIGINAL)
+        # Handle transition between color modes
+        if needs_grayscale and not is_currently_grayscale:
+            # Convert RGB to grayscale
+            if FRAME_BUFFER_GRAYSCALE is None or FRAME_BUFFER_GRAYSCALE.shape != (FRAME_BUFFER_ORIGINAL.shape[0], FRAME_BUFFER_ORIGINAL.shape[1]):
+                FRAME_BUFFER_GRAYSCALE = np.empty((FRAME_BUFFER_ORIGINAL.shape[0], FRAME_BUFFER_ORIGINAL.shape[1]), dtype=np.uint8)
+            
+            # Calculate grayscale with weighted average
+            FRAME_BUFFER_GRAYSCALE = np.dot(FRAME_BUFFER_ORIGINAL[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+            
+            # Reuse the global processing buffer with correct shape
+            FRAME_BUFFER_PROCESSING = np.empty_like(FRAME_BUFFER_GRAYSCALE)
+            np.copyto(FRAME_BUFFER_PROCESSING, FRAME_BUFFER_GRAYSCALE)
+        elif not needs_grayscale and is_currently_grayscale:
+            # Cannot convert grayscale to RGB (would need the original), just use grayscale as all channels
+            print("Warning: Cannot convert from grayscale to RGB, using grayscale for all channels")
+            rgb_from_gray = np.stack([FRAME_BUFFER_ORIGINAL] * 3, axis=-1)
+            
+            # Reuse the global processing buffer with correct shape
+            if FRAME_BUFFER_PROCESSING is None or FRAME_BUFFER_PROCESSING.shape != rgb_from_gray.shape:
+                FRAME_BUFFER_PROCESSING = np.empty_like(rgb_from_gray)
+            np.copyto(FRAME_BUFFER_PROCESSING, rgb_from_gray)
+        else:
+            # No color mode change, use the original directly
+            if FRAME_BUFFER_PROCESSING is None or FRAME_BUFFER_PROCESSING.shape != FRAME_BUFFER_ORIGINAL.shape:
+                FRAME_BUFFER_PROCESSING = np.empty_like(FRAME_BUFFER_ORIGINAL)
+            np.copyto(FRAME_BUFFER_PROCESSING, FRAME_BUFFER_ORIGINAL)
         
         # Apply contrast if needed
         if abs(contrast_factor - 1.0) > 0.01:
@@ -1622,6 +1663,7 @@ class DitherApp(QMainWindow):
                 print("Applied contrast adjustment.")
             except Exception as e:
                 print(f"Error applying contrast: {e}")
+                import traceback
                 traceback.print_exc()
         
         # Apply selected dithering algorithm
@@ -1706,18 +1748,31 @@ class DitherApp(QMainWindow):
             mode = 'L'
             
         if pixel_scale == 1:
-            # Ensure shared buffer is allocated and correct size
-            if SHARED_ALGORITHM_BUFFER is None or SHARED_ALGORITHM_BUFFER.shape != array.shape:
-                SHARED_ALGORITHM_BUFFER = np.empty_like(array, dtype=np.float32)
-            
-            # Copy input to shared buffer
-            np.copyto(SHARED_ALGORITHM_BUFFER, array)
-            
-            # Apply dithering to shared buffer
-            result = fs_dither(SHARED_ALGORITHM_BUFFER, mode, threshold)
-            
-            # Return result directly - it's the same buffer
-            return result
+            try:
+                # Ensure shared buffer is allocated and correct size/shape
+                if SHARED_ALGORITHM_BUFFER is None or SHARED_ALGORITHM_BUFFER.shape != array.shape:
+                    # Buffer doesn't exist or has wrong shape, create a new one
+                    SHARED_ALGORITHM_BUFFER = np.empty_like(array, dtype=np.float32)
+                    print(f"Created new Floyd-Steinberg buffer with shape {array.shape}")
+                elif SHARED_ALGORITHM_BUFFER.dtype != np.float32:
+                    # Buffer exists but wrong type, recreate
+                    SHARED_ALGORITHM_BUFFER = np.empty_like(array, dtype=np.float32)
+                    print(f"Recreated Floyd-Steinberg buffer with correct dtype")
+                
+                # Copy input to shared buffer
+                np.copyto(SHARED_ALGORITHM_BUFFER, array)
+                
+                # Apply dithering to shared buffer
+                result = fs_dither(SHARED_ALGORITHM_BUFFER, mode, threshold)
+                
+                # Return result directly - it's the same buffer
+                return result
+            except Exception as e:
+                print(f"Error in shared buffer handling (falling back to normal mode): {e}")
+                # Fall back to normal mode if there's an error with the shared buffer
+                arr = array.astype(np.float32)
+                arr = fs_dither(arr, mode, threshold)
+                return arr.astype(np.uint8)
         else:
             # For pixel scaling, use existing implementation
             arr = array.astype(np.uint8)
@@ -1737,21 +1792,38 @@ class DitherApp(QMainWindow):
             type = 'L'
             
         if pixel_scale == 1:
-            # Ensure shared buffer is allocated and correct size
-            if SHARED_ALGORITHM_BUFFER is None or SHARED_ALGORITHM_BUFFER.shape != array.shape:
-                SHARED_ALGORITHM_BUFFER = np.empty_like(array, dtype=np.uint8)
+            try:
+                # Ensure shared buffer is allocated and correct size/shape
+                if SHARED_ALGORITHM_BUFFER is None or SHARED_ALGORITHM_BUFFER.shape != array.shape:
+                    # Buffer doesn't exist or has wrong shape, create a new one
+                    SHARED_ALGORITHM_BUFFER = np.empty_like(array, dtype=np.uint8)
+                    print(f"Created new Simple Threshold buffer with shape {array.shape}")
+                elif SHARED_ALGORITHM_BUFFER.dtype != np.uint8:
+                    # Buffer exists but wrong type, recreate
+                    SHARED_ALGORITHM_BUFFER = np.empty_like(array, dtype=np.uint8)
+                    print(f"Recreated Simple Threshold buffer with correct dtype")
                 
-            # Copy input to shared buffer
-            np.copyto(SHARED_ALGORITHM_BUFFER, array)
-                
-            if type == 'RGB':
-                # Process directly in shared buffer
-                result = simple_threshold_rgb_ps1(SHARED_ALGORITHM_BUFFER, threshold)
-                return result
-            else:
-                # For grayscale, use vectorized operations on shared buffer
-                np.where(SHARED_ALGORITHM_BUFFER < threshold, 0, 255, out=SHARED_ALGORITHM_BUFFER)
-                return SHARED_ALGORITHM_BUFFER
+                # Copy input to shared buffer
+                np.copyto(SHARED_ALGORITHM_BUFFER, array)
+                    
+                if type == 'RGB':
+                    # Process directly in shared buffer
+                    result = simple_threshold_rgb_ps1(SHARED_ALGORITHM_BUFFER, threshold)
+                    return result
+                else:
+                    # For grayscale, use vectorized operations on shared buffer
+                    np.where(SHARED_ALGORITHM_BUFFER < threshold, 0, 255, out=SHARED_ALGORITHM_BUFFER)
+                    return SHARED_ALGORITHM_BUFFER
+            except Exception as e:
+                print(f"Error in shared buffer handling (falling back to normal mode): {e}")
+                # Fall back to normal method if there's a shared buffer error
+                img_array = array.astype(np.uint8)
+                if type == 'RGB':
+                    result = simple_threshold_rgb_ps1(img_array, threshold)
+                    return result.astype(np.uint8)
+                else:
+                    result = np.where(img_array < threshold, 0, 255).astype(np.uint8)
+                    return result
         else:
             # For pixel scaling, use existing implementation
             orig_h, orig_w = array.shape[:2]
