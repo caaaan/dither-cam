@@ -1247,6 +1247,9 @@ class DitherApp(QMainWindow):
         if not self.camera_mode_active:
             return  # Ignore frames if camera is no longer active
         
+        # Ensure proper global variable access
+        global FRAME_BUFFER_ORIGINAL, FRAME_BUFFER_OUTPUT
+        
         # Check if we're in freeze frame mode
         current_time = time.time()
         if self.freeze_frame is not None:
@@ -1262,7 +1265,6 @@ class DitherApp(QMainWindow):
         self.image_viewer.set_image(frame_array)
         
         # Enable toggle button if we have both original and output frames
-        global FRAME_BUFFER_ORIGINAL, FRAME_BUFFER_OUTPUT
         if FRAME_BUFFER_ORIGINAL is not None and FRAME_BUFFER_OUTPUT is not None:
             self.toggle_button.setEnabled(True)
             
@@ -1279,7 +1281,6 @@ class DitherApp(QMainWindow):
                 self.freeze_frame = frame_array.copy()
                 
             # Save the current captured frame as FRAME_BUFFER_ORIGINAL
-            global FRAME_BUFFER_ORIGINAL
             if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != frame_array.shape:
                 FRAME_BUFFER_ORIGINAL = np.empty_like(frame_array)
             np.copyto(FRAME_BUFFER_ORIGINAL, frame_array)
