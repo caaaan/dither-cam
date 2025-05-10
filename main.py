@@ -850,8 +850,8 @@ class DitherApp(QMainWindow):
         self.setWindowTitle(config.APP_NAME)
         self.resize(1200, 800)
         
-        self.original_image = None
-        self.dithered_image = None
+        self.original_array = None  # Store the original image as a NumPy array
+        self.dithered_image = None  # Store the dithered image (also as NumPy array)
         self.showing_original = False # Show dithered version first by default
         
         # Initialize camera mode as disabled by default
@@ -1172,7 +1172,7 @@ class DitherApp(QMainWindow):
             
             # Clear current image
             self.showing_original = False
-            self.original_image = None
+            self.original_array = None
             self.dithered_image = None
             self.toggle_button.setEnabled(False)
             
@@ -1272,28 +1272,22 @@ class DitherApp(QMainWindow):
         if not self.camera_mode_active:
             print("Camera not active, frame update ignored")
             return
+        
         import numpy as np
-        # If dithered_img is a PIL Image, convert to NumPy array
-        try:
-            from PIL import Image
-            if isinstance(dithered_img, Image.Image):
-                if dithered_img.mode == "RGB" or dithered_img.mode == "L":
-                    dithered_img = np.array(dithered_img)
-                else:
-                    dithered_img = np.array(dithered_img.convert("RGB"))
-        except Exception as e:
-            print(f"update_camera_frame: Could not convert PIL image to array: {e}")
+        # Make sure we have a NumPy array
+        if not isinstance(dithered_img, np.ndarray):
+            print(f"update_camera_frame: Unsupported image type {type(dithered_img)}")
             self.image_viewer.set_image(None)
             return
+        
         # Display the dithered frame
         if dithered_img is not None:
             # Check if we need to capture this frame
             if self.capture_frame_requested:
                 print("Captured frame received")
                 self.capture_frame_requested = False  # Reset flag
-                self.original_image = dithered_img.copy() if isinstance(dithered_img, np.ndarray) else None
-                self.original_array = dithered_img if isinstance(dithered_img, np.ndarray) else None
-                print(f"Frame captured: array shape={getattr(dithered_img, 'shape', None)}")
+                self.original_array = dithered_img.copy()
+                print(f"Frame captured: array shape={dithered_img.shape}")
                 print("Stopping camera after frame capture...")
                 self.stop_camera()
                 try:
@@ -1316,19 +1310,16 @@ class DitherApp(QMainWindow):
                 else:
                     print("Failed to apply dithering to captured frame")
                 return
+            
             # For normal camera display, update the display
-            if isinstance(dithered_img, np.ndarray):
-                self.image_viewer.update_frame(dithered_img)
-                self.dithered_image = dithered_img
-                self.save_button.setEnabled(True)
-            else:
-                print("update_camera_frame: Unsupported image type for display.")
-                self.image_viewer.set_image(None)
+            self.image_viewer.update_frame(dithered_img)
+            self.dithered_image = dithered_img
+            self.save_button.setEnabled(True)
         else:
             print("Warning: Received None image in update_camera_frame")
     
     def toggle_image_display(self):
-        if not self.original_image or not self.dithered_image:
+        if not self.original_array or not self.dithered_image:
             return
         
         # Update showing_original flag
@@ -1339,7 +1330,7 @@ class DitherApp(QMainWindow):
             self.pass_through_mode.setChecked(False)
         
         if self.showing_original:
-            self.display_image(self.original_image)
+            self.display_image(self.original_array)
             self.toggle_button.setText("Switch to Dithered Image")
         else:
             self.display_image(self.dithered_image)
@@ -1422,7 +1413,6 @@ class DitherApp(QMainWindow):
             print(f"Error opening image: {e}")
             import traceback
             traceback.print_exc()
-            self.original_image = None
             self.original_array = None
             self.dithered_image = None
             self.image_viewer.set_image(None) 
@@ -1432,25 +1422,39 @@ class DitherApp(QMainWindow):
     
     def display_image(self, image, is_bgr_data=False):
         import numpy as np
-        # If input is a PIL Image, convert to NumPy array
-        try:
-            from PIL import Image
-            if isinstance(image, Image.Image):
-                if image.mode == "RGB" or image.mode == "L":
-                    image = np.array(image)
-                else:
-                    image = np.array(image.convert("RGB"))
-        except Exception as e:
-            print(f"display_image: Could not convert PIL image to array: {e}")
+        
+        if image is None:
             self.image_viewer.set_image(None)
             return
-            # Only handle NumPy arrays from here
-            if isinstance(image, np.ndarray):
-                self.image_viewer.update_frame(image)
-            else:
-                print("display_image: Unsupported image type for display.")
-                self.image_viewer.set_image(None)
-    
+        
+        # Make sure we're dealing with a NumPy array
+        if not isinstance(image, np.ndarray):
+            print(f"display_image: Image is not a NumPy array, type={type(image)}")
+            self.image_viewer.set_image(None)
+            return
+        
+        # Convert BGR to RGB if needed
+        if is_bgr_data and len(image.shape) == 3 and image.shape[2] == 3:
+            # Use BGR to RGB conversion
+            try:
+                if 'cv2' in sys.modules:
+                    # Use OpenCV if available
+                    import cv2
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                else:
+                    # Use our helper function
+                    image = bgr_to_rgb(image)
+            except Exception as e:
+                print(f"Error converting BGR to RGB: {e}")
+        
+        # Update the image viewer with the NumPy array
+        try:
+            self.image_viewer.update_frame(image)
+        except Exception as e:
+            print(f"Error updating image viewer: {e}")
+            traceback.print_exc()
+            self.image_viewer.set_image(None)
+
     def threshold_changed(self, value):
         self.threshold_label.setText(f"Threshold: {value}")
         if self.auto_render.isChecked():
@@ -1479,7 +1483,7 @@ class DitherApp(QMainWindow):
             print("Applying RGB mode change to camera feed")
             
         # Apply dithering to static images if auto-render is on
-        if self.auto_render.isChecked() and self.original_image is not None:
+        if self.auto_render.isChecked() and self.original_array is not None:
             self.apply_dither()
     
     def apply_dither(self):
@@ -1796,10 +1800,10 @@ class DitherApp(QMainWindow):
             print("Applying pass-through mode change to camera feed")
             
         # For static images, apply the change if auto-render is on
-        if self.auto_render.isChecked() and self.original_image is not None:
+        if self.auto_render.isChecked() and self.original_array is not None:
             if self.pass_through_mode.isChecked():
                 # In pass-through mode, display original image
-                self.display_image(self.original_image)
+                self.display_image(self.original_array)
                 self.showing_original = True
                 self.toggle_button.setText("Switch to Dithered Image")
             else:
