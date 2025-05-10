@@ -23,6 +23,19 @@ except ImportError:
     PICAMERA_AVAILABLE = False
     print("Warning: picamera module not available. Camera features will be disabled.")
 
+def bgr_to_rgb_array(array):
+    """Convert BGR array to RGB using simple NumPy slice operation"""
+    if array is None or len(array.shape) < 3 or array.shape[2] < 3:
+        return array
+    return array[:, :, ::-1].copy()
+
+def rgb_to_bgr_array(array):
+    """Convert RGB array to BGR using simple NumPy slice operation"""
+    # Same operation as BGR to RGB but kept separate for code clarity
+    if array is None or len(array.shape) < 3 or array.shape[2] < 3:
+        return array
+    return array[:, :, ::-1].copy()
+
 class CameraCaptureThread(QThread):
     frameProcessed = pyqtSignal(np.ndarray)  # Emit processed frames directly
 
@@ -324,27 +337,25 @@ class CameraCaptureThread(QThread):
                         if frame.shape[2] == 4:  # Convert RGBA to RGB if needed
                             frame = frame[:, :, :3]
                         
-                        # For non-pass-through mode, convert BGR to RGB as before 
-                        if not self.app.pass_through_mode.isChecked():
-                            # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
-                            #frame = bgr_to_rgb(frame)
-                            
-                            # Reuse buffer if possible
-                            if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
-                                self.frame_buffer = np.empty_like(frame)
-                            np.copyto(self.frame_buffer, frame)
+                        # Simple BGR to RGB conversion with NumPy - more efficient than loading OpenCV
+                        frame = frame[:, :, ::-1].copy()  # Reverse the color channels
+                        
+                        # Reuse buffer if possible
+                        if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
+                            self.frame_buffer = np.empty_like(frame)
+                        np.copyto(self.frame_buffer, frame)
                         
                         # Process based on mode
                         if self.app.pass_through_mode.isChecked():
-                            # For pass-through mode, emit the frame directly
+                            # For pass-through mode, emit the RGB frame
                             pt_start = time.time()
                             
-                            # Emit the frame directly
-                            self.frameProcessed.emit(frame)
+                            # Emit the RGB-converted frame instead of the original BGR frame
+                            self.frameProcessed.emit(self.frame_buffer)  # frame_buffer is already RGB
                             
                             # Report pass-through processing time
                             pt_time = (time.time() - pt_start) * 1000  # Convert to ms
-                            if frames_captured % 30 == 0:  # Only log occasionally to avoid overwhelming output
+                            if frames_captured % 30 == 0:  # Only log occasionally
                                 print(f"Pass-through processing time: {pt_time:.3f}ms")
                         elif self.app.rgb_mode.isChecked():
                             # RGB mode
@@ -584,17 +595,17 @@ class FrameProcessingThread(QThread):
                 # Reset queue full counter since we got a frame
                 self.queue_full_count = 0
                 
+                # Use direct NumPy array operations for BGR to RGB conversion
+                frame = frame[:, :, ::-1].copy()  # Reverse the color channels
+                
                 # Make sure we have a proper RGB frame
                 if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
                     try:
-                        # For non-pass-through mode, convert BGR to RGB as before
-                        #if not self.app.pass_through_mode.isChecked():
-                            # Convert BGR to RGB if needed (since many camera sources provide BGR by default)
-                        frame = bgr_to_rgb(frame)
+                        # Now all processing uses RGB frames
                         
                         # Check if pass-through mode is enabled
                         if self.app.pass_through_mode.isChecked():
-                            # Emit the frame directly without any processing
+                            # In pass-through mode, just emit the RGB frame directly
                             if self.is_running:
                                 self.frameProcessed.emit(frame)
                         else:
@@ -760,25 +771,31 @@ class ImageViewer(QScrollArea):
         """Efficiently update the display with a NumPy array (RGB or grayscale)."""
         import numpy as np
         from PyQt6.QtGui import QImage, QPixmap
-        # Determine format
+        
+        # Determine format - assumes frame_array is already in RGB order (not BGR)
         if frame_array.ndim == 3 and frame_array.shape[2] == 3:
+            # QImage.Format_RGB888 expects data in RGB order
             fmt = QImage.Format.Format_RGB888
             bytes_per_line = frame_array.shape[1] * 3
         elif frame_array.ndim == 2:
             fmt = QImage.Format.Format_Grayscale8
             bytes_per_line = frame_array.shape[1]
         else:
-            raise ValueError("Unsupported frame shape for update_frame: {}".format(frame_array.shape))
+            raise ValueError(f"Unsupported frame shape for update_frame: {frame_array.shape}")
+        
         size = (frame_array.shape[1], frame_array.shape[0])
+        
         # Only recreate QImage if size or format changes
+        # Note: QImage for RGB888 expects data in RGB order (not BGR)
         if self.qimage_buffer is None or self.current_format != fmt or self.current_size != size:
             self.qimage_buffer = QImage(frame_array.data, size[0], size[1], bytes_per_line, fmt)
             self.current_format = fmt
             self.current_size = size
         else:
-            # Update buffer data in-place if possible
+            # Update buffer data in-place
             self.qimage_buffer = QImage(frame_array.data, size[0], size[1], bytes_per_line, fmt)
-        # Convert to QPixmap
+        
+        # Convert to QPixmap and update the image
         self.pixmap_buffer = QPixmap.fromImage(self.qimage_buffer)
         self.set_image(self.pixmap_buffer)
 
@@ -1337,6 +1354,7 @@ class DitherApp(QMainWindow):
             self.toggle_button.setText("Switch to Original Image")
     
     def open_image(self):
+        """Open an image file and convert to NumPy array"""
         # Ensure camera is stopped first
         if self.camera_mode_active:
             self.stop_camera()
@@ -1349,47 +1367,19 @@ class DitherApp(QMainWindow):
         
         self.open_path = path
         try:
-            # Load the image directly as NumPy array using OpenCV or Qt
-            try:
-                import cv2
-                # Load with OpenCV (BGR format)
-                img_array = cv2.imread(path)
-                if img_array is None:
-                    raise ValueError(f"Failed to load image from {path}")
-                    
-                # Convert BGR to RGB for internal processing
-                self.original_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
-            except ImportError:
-                # Fallback to Qt if OpenCV is not available
-                try:
-                    q_image = QImage(path)
-                    if q_image.isNull():
-                        raise ValueError(f"Qt failed to load image from {path}")
-                        
-                    # Convert QImage to NumPy array
-                    width = q_image.width()
-                    height = q_image.height()
-                    
-                    # Create NumPy array based on QImage format
-                    if q_image.format() == QImage.Format.Format_Grayscale8:
-                        # Grayscale image
-                        ptr = q_image.constBits()
-                        self.original_array = np.array(ptr).reshape(height, width).copy()
-                    else:
-                        # Convert to RGB format for consistency
-                        q_image = q_image.convertToFormat(QImage.Format.Format_RGB888)
-                        ptr = q_image.constBits()
-                        self.original_array = np.array(ptr).reshape(height, width, 3).copy()
-                except Exception as e:
-                    print(f"Error loading image with Qt: {e}")
-                    traceback.print_exc()
-                    raise
-            
-            print(f"Loaded image: {path}, shape={self.original_array.shape}")
+            # Load the image with OpenCV - simple and direct
+            import cv2
+            img_array = cv2.imread(path)
+            if img_array is None:
+                raise ValueError(f"Failed to load image from {path}")
+                
+            # Convert BGR to RGB using NumPy slicing
+            self.original_array = img_array[:, :, ::-1]  # BGR to RGB conversion
+            print(f"Loaded image from {path}, shape={self.original_array.shape}")
             
             # Convert to grayscale if needed based on current mode
             if not self.rgb_mode.isChecked() and len(self.original_array.shape) == 3:
-                # Convert to grayscale
+                # Convert to grayscale using NumPy weighted average
                 self.original_array = np.dot(self.original_array[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
             
             # Apply dithering directly to array
@@ -1397,17 +1387,18 @@ class DitherApp(QMainWindow):
             self.image_viewer.set_zoom_level(1.0) # Reset zoom for the new image view
 
             if self.dithered_image is not None:
-                # Dithering was successful, dithered image is shown
+                # Dithering was successful
                 self.toggle_button.setText("Switch to Original Image")
                 self.save_button.setEnabled(True)
-                self.toggle_button.setEnabled(True) # Original also exists
+                self.toggle_button.setEnabled(True)
+                self.showing_original = False
             else:
                 # Initial dithering failed, fall back to showing original
-                self.showing_original = True # Update state to reflect original is shown
-                self.display_image(self.original_array) # Explicitly display original
+                self.showing_original = True
+                self.display_image(self.original_array)
                 self.toggle_button.setText("Switch to Dithered Image")
                 self.save_button.setEnabled(False)
-                self.toggle_button.setEnabled(False) # No dithered image to switch to
+                self.toggle_button.setEnabled(False)
                 
         except Exception as e:
             print(f"Error opening image: {e}")
@@ -1415,32 +1406,39 @@ class DitherApp(QMainWindow):
             traceback.print_exc()
             self.original_array = None
             self.dithered_image = None
-            self.image_viewer.set_image(None) 
+            self.image_viewer.set_image(None)
             self.save_button.setEnabled(False)
             self.toggle_button.setEnabled(False)
-            self.showing_original = False # Reset for next attempt
+            self.showing_original = False
     
     def display_image(self, image, is_bgr_data=False):
+        """Display an image in the image viewer, ensuring correct RGB color order"""
         import numpy as np
-        # If input is a PIL Image, convert to NumPy array
-        try:
-            from PIL import Image
-            if isinstance(image, Image.Image):
-                if image.mode == "RGB" or image.mode == "L":
-                    image = np.array(image)
-                else:
-                    image = np.array(image.convert("RGB"))
-        except Exception as e:
-            print(f"display_image: Could not convert PIL image to array: {e}")
+        
+        if image is None:
             self.image_viewer.set_image(None)
             return
-            # Only handle NumPy arrays from here
-            if isinstance(image, np.ndarray):
-                self.image_viewer.update_frame(image)
-            else:
-                print("display_image: Unsupported image type for display.")
-                self.image_viewer.set_image(None)
-    
+        
+        # Make sure we're dealing with a NumPy array
+        if not isinstance(image, np.ndarray):
+            print(f"display_image: Image is not a NumPy array, type={type(image)}")
+            self.image_viewer.set_image(None)
+            return
+        
+        # Convert BGR to RGB if needed using NumPy (avoid OpenCV dependency)
+        if is_bgr_data and len(image.shape) == 3 and image.shape[2] == 3:
+            # Simply swap the channels using NumPy slice operations
+            image = image[:, :, ::-1].copy()
+        
+        try:
+            # Update the image viewer with the RGB NumPy array
+            self.image_viewer.update_frame(image)
+        except Exception as e:
+            print(f"Error updating image viewer: {e}")
+            import traceback
+            traceback.print_exc()
+            self.image_viewer.set_image(None)
+
     def threshold_changed(self, value):
         self.threshold_label.setText(f"Threshold: {value}")
         if self.auto_render.isChecked():
@@ -1539,11 +1537,8 @@ class DitherApp(QMainWindow):
             return
         
         try:
-            # Debug info about the image
-            print(f"Image to save: type={type(self.dithered_image)}, shape={getattr(self.dithered_image, 'shape', None)}")
-            
-            # Get save path with explicit file extension filters
-            path, selected_filter = QFileDialog.getSaveFileName(
+            # Get save path
+            path, _ = QFileDialog.getSaveFileName(
                 self, "Save Image", "", 
                 "PNG Files (*.png);;JPEG Files (*.jpg);;All Files (*.*)"
             )
@@ -1556,48 +1551,25 @@ class DitherApp(QMainWindow):
             # Ensure path has a valid extension
             if not (path.lower().endswith('.png') or path.lower().endswith('.jpg') or 
                     path.lower().endswith('.jpeg')):
-                # Default to PNG if no extension provided
                 path += '.png'
-                print(f"Added default extension: {path}")
             
-            print(f"Saving to path: {path}")
+            print(f"Saving image to {path}, shape={self.dithered_image.shape}")
             
-            # Save NumPy array using OpenCV or another library
-            try:
-                # Import cv2 for image saving
-                import cv2
-                
-                # Make a copy to avoid modifying the original
-                save_array = self.dithered_image.copy()
-                
-                # Convert grayscale to 3-channel if needed for consistent saving
-                if len(save_array.shape) == 2:
-                    # This is a grayscale image
-                    # For saving, we can keep it as single channel
-                    pass
-                elif len(save_array.shape) == 3 and save_array.shape[2] == 3:
-                    # This is an RGB image - needs BGR conversion for OpenCV
-                    save_array = cv2.cvtColor(save_array, cv2.COLOR_RGB2BGR)
-                
-                # Save the image
-                cv2.imwrite(path, save_array)
-                print(f"Image saved successfully to {path}")
-            except ImportError:
-                # Fallback if OpenCV is not available
-                try:
-                    from matplotlib import pyplot as plt
-                    plt.imsave(path, self.dithered_image)
-                    print(f"Image saved with matplotlib to {path}")
-                except Exception as e:
-                    print(f"Error saving with matplotlib: {e}")
-                    import traceback
-                    traceback.print_exc()
-            except Exception as e:
-                print(f"Error saving image: {e}")
-                import traceback
-                traceback.print_exc()
+            # Use OpenCV for saving - simple and direct
+            import cv2
+            
+            # Make a copy to avoid modifying the original
+            save_array = self.dithered_image.copy()
+            
+            # Convert RGB to BGR for OpenCV if it's a color image
+            if len(save_array.shape) == 3 and save_array.shape[2] == 3:
+                save_array = save_array[:, :, ::-1]  # RGB to BGR conversion
+            
+            # Save the image
+            cv2.imwrite(path, save_array)
+            print(f"Image saved successfully to {path}")
         except Exception as e:
-            print(f"Error in save_image: {e}")
+            print(f"Error saving image: {e}")
             import traceback
             traceback.print_exc()
     
