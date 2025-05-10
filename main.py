@@ -336,38 +336,31 @@ class CameraCaptureThread(QThread):
                         
                         # Process based on mode
                         if self.app.pass_through_mode.isChecked():
-                            # For pass-through mode, use the efficient BGR-to-PIL conversion
-                            # Measure pass-through processing time
+                            # For pass-through mode, emit the frame directly
                             pt_start = time.time()
                             
-                            # Efficient creation of PIL image from BGR data without full conversion
-                            pil_result = bgr_array_to_pil(frame)
+                            # Emit the frame directly
+                            self.frameProcessed.emit(frame)
                             
                             # Report pass-through processing time
                             pt_time = (time.time() - pt_start) * 1000  # Convert to ms
                             if frames_captured % 30 == 0:  # Only log occasionally to avoid overwhelming output
                                 print(f"Pass-through processing time: {pt_time:.3f}ms")
-                            
-                            self.frameProcessed.emit(frame)
                         elif self.app.rgb_mode.isChecked():
                             # RGB mode
                             processed_array = self.process_frame_array(self.frame_buffer, 'RGB')
+                            if processed_array is not None:
+                                # Send NumPy array directly to UI - no PIL conversion
+                                self.frameProcessed.emit(processed_array)
                         else:
                             # Create grayscale conversion
                             gray = np.dot(frame[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
                             
                             # Process grayscale
                             processed_array = self.process_frame_array(gray, 'L')
-                        
-                        # Convert to PIL image for display (only for non pass-through mode)
-                        if not self.app.pass_through_mode.isChecked() and processed_array is not None:
-                            if processed_array.ndim == 3:
-                                pil_result = Image.fromarray(processed_array, 'RGB')
-                            else:
-                                pil_result = Image.fromarray(processed_array, 'L')
-                                
-                            # Send to UI
-                            self.frameProcessed.emit(pil_result)
+                            if processed_array is not None:
+                                # Send NumPy array directly to UI - no PIL conversion
+                                self.frameProcessed.emit(processed_array)
                     else:
                         print(f"Invalid frame format: {frame.shape if frame is not None else None}")
                     
@@ -548,7 +541,6 @@ class FrameProcessingThread(QThread):
         print("Processing thread initialized")
         
         # Buffer reuse for reduced memory allocation
-        self.pil_buffer = None
         self.result_buffer = None
         self.rgb_buffer = None
         self.gray_buffer = None
@@ -602,10 +594,7 @@ class FrameProcessingThread(QThread):
                         
                         # Check if pass-through mode is enabled
                         if self.app.pass_through_mode.isChecked():
-                            # Efficient creation of PIL image from BGR data without full conversion
-                            pil_result = bgr_array_to_pil(frame)
-                            
-                            # Emit processed frame - only if we're still running
+                            # Emit the frame directly without any processing
                             if self.is_running:
                                 self.frameProcessed.emit(frame)
                         else:
@@ -626,17 +615,9 @@ class FrameProcessingThread(QThread):
                                 processed_array = self.process_frame_array(frame, 'RGB')
                             
                             if processed_array is not None:
-                                # Only convert to PIL at the very end for display
-                                if processed_array.ndim == 3:
-                                    # RGB array
-                                    pil_result = Image.fromarray(processed_array, 'RGB')
-                                else:
-                                    # Grayscale array
-                                    pil_result = Image.fromarray(processed_array, 'L')
-                                
-                                # Emit processed frame - only if we're still running
+                                # Emit processed NumPy array directly - no conversion to PIL needed
                                 if self.is_running:
-                                    self.frameProcessed.emit(pil_result)
+                                    self.frameProcessed.emit(processed_array)
                     except Exception as e:
                         print(f"Error processing frame: {e}")
                         import traceback
@@ -666,51 +647,6 @@ class FrameProcessingThread(QThread):
                 last_report_time = current_time
         
         print("Processing thread stopped")
-
-    def process_frame(self, pil_img):
-        """Apply dithering to a frame based on current app settings"""
-        try:
-            # Get current settings from main app
-            alg = self.app.algorithm_combo.currentText()
-            thr = self.app.threshold_slider.value()
-            contrast_factor = self.app.contrast_slider.value() / 100.0
-            pixel_s = self.app.scale_slider.value()
-            use_rgb = self.app.rgb_mode.isChecked()
-            
-            # Prepare the image format as needed
-            if use_rgb and pil_img.mode != 'RGB':
-                # Convert to RGB format
-                image_to_dither = pil_img.convert('RGB')
-            elif not use_rgb and pil_img.mode != 'L':
-                # Convert to grayscale format
-                image_to_dither = pil_img.convert('L')
-            else:
-                # Already in the right format
-                image_to_dither = pil_img
-            
-            # Apply contrast if needed
-            if abs(contrast_factor - 1.0) > 0.01:
-                try:
-                    enhancer = ImageEnhance.Contrast(image_to_dither)
-                    image_to_dither = enhancer.enhance(contrast_factor)
-                except Exception as e:
-                    print(f"Error applying contrast: {e}")
-                    # Continue with original image
-            
-            # Apply selected dithering algorithm
-            if alg == "Floyd-Steinberg":
-                result = self.app.floyd_steinberg_numpy(image_to_dither, thr, pixel_s)
-            elif alg == "Simple Threshold":
-                result = self.app.simple_threshold(image_to_dither, thr, pixel_s)
-            else:
-                result = image_to_dither  # Fallback
-                
-            return result
-        except Exception as e:
-            print(f"Error in process_frame: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
 
     def process_frame_array(self, array, mode):
         """Apply dithering directly to a NumPy array based on current app settings"""
@@ -1422,24 +1358,54 @@ class DitherApp(QMainWindow):
         
         self.open_path = path
         try:
-            # Load the image
-            self.original_image = Image.open(path)
+            # Load the image directly as NumPy array using OpenCV or Qt
+            try:
+                import cv2
+                # Load with OpenCV (BGR format)
+                img_array = cv2.imread(path)
+                if img_array is None:
+                    raise ValueError(f"Failed to load image from {path}")
+                    
+                # Convert BGR to RGB for internal processing
+                self.original_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+            except ImportError:
+                # Fallback to Qt if OpenCV is not available
+                try:
+                    q_image = QImage(path)
+                    if q_image.isNull():
+                        raise ValueError(f"Qt failed to load image from {path}")
+                        
+                    # Convert QImage to NumPy array
+                    width = q_image.width()
+                    height = q_image.height()
+                    
+                    # Create NumPy array based on QImage format
+                    if q_image.format() == QImage.Format.Format_Grayscale8:
+                        # Grayscale image
+                        ptr = q_image.constBits()
+                        self.original_array = np.array(ptr).reshape(height, width).copy()
+                    else:
+                        # Convert to RGB format for consistency
+                        q_image = q_image.convertToFormat(QImage.Format.Format_RGB888)
+                        ptr = q_image.constBits()
+                        self.original_array = np.array(ptr).reshape(height, width, 3).copy()
+                except Exception as e:
+                    print(f"Error loading image with Qt: {e}")
+                    traceback.print_exc()
+                    raise
             
-            # Also store as NumPy array for direct processing
-            if self.rgb_mode.isChecked():
-                # Ensure RGB mode
-                rgb_image = self.original_image.convert('RGB')
-                self.original_array = np.array(rgb_image)
-            else:
+            print(f"Loaded image: {path}, shape={self.original_array.shape}")
+            
+            # Convert to grayscale if needed based on current mode
+            if not self.rgb_mode.isChecked() and len(self.original_array.shape) == 3:
                 # Convert to grayscale
-                gray_image = self.original_image.convert('L')
-                self.original_array = np.array(gray_image)
+                self.original_array = np.dot(self.original_array[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
             
             # Apply dithering directly to array
             self.apply_dither_to_array()
             self.image_viewer.set_zoom_level(1.0) # Reset zoom for the new image view
 
-            if self.dithered_image:
+            if self.dithered_image is not None:
                 # Dithering was successful, dithered image is shown
                 self.toggle_button.setText("Switch to Original Image")
                 self.save_button.setEnabled(True)
@@ -1447,7 +1413,7 @@ class DitherApp(QMainWindow):
             else:
                 # Initial dithering failed, fall back to showing original
                 self.showing_original = True # Update state to reflect original is shown
-                self.display_image(self.original_image) # Explicitly display original
+                self.display_image(self.original_array) # Explicitly display original
                 self.toggle_button.setText("Switch to Dithered Image")
                 self.save_button.setEnabled(False)
                 self.toggle_button.setEnabled(False) # No dithered image to switch to
@@ -1517,16 +1483,16 @@ class DitherApp(QMainWindow):
             self.apply_dither()
     
     def apply_dither(self):
-        if not self.original_image:
+        if self.original_array is None:
             return
         
         # In pass-through mode, just display the original image
         if self.pass_through_mode.isChecked():
-            self.dithered_image = self.original_image
+            self.dithered_image = self.original_array.copy()
             self.showing_original = True
             self.toggle_button.setText("Switch to Dithered Image")
             self.toggle_button.setEnabled(True)
-            self.display_image(self.original_image)
+            self.display_image(self.dithered_image)
             return
         
         alg = self.algorithm_combo.currentText()
@@ -1536,25 +1502,39 @@ class DitherApp(QMainWindow):
         
         print(f"Applying {alg} with threshold {thr}, contrast {contrast_factor:.2f}, scale {pixel_s}")
         
-        image_to_dither = self.original_image
+        # Make a copy of the array to avoid modifying the original
+        array_to_dither = self.original_array.copy()
+        
+        # Apply contrast if needed
         if abs(contrast_factor - 1.0) > 0.01:
             try:
-                enhancer = ImageEnhance.Contrast(self.original_image)
-                image_to_dither = enhancer.enhance(contrast_factor)
+                # Apply contrast directly to NumPy array
+                if len(array_to_dither.shape) == 3:  # RGB
+                    # Apply to each channel separately
+                    for c in range(3):
+                        channel = array_to_dither[:,:,c].astype(np.float32)
+                        # Simple contrast adjustment formula: f(x) = 128 + contrast_factor * (x - 128)
+                        channel = 128 + contrast_factor * (channel - 128)
+                        array_to_dither[:,:,c] = np.clip(channel, 0, 255).astype(np.uint8)
+                else:  # Grayscale
+                    array_to_dither = array_to_dither.astype(np.float32)
+                    array_to_dither = 128 + contrast_factor * (array_to_dither - 128)
+                    array_to_dither = np.clip(array_to_dither, 0, 255).astype(np.uint8)
                 print("Applied contrast adjustment.")
             except Exception as e:
                 print(f"Error applying contrast: {e}")
-                image_to_dither = self.original_image
+                traceback.print_exc()
         
+        # Apply selected dithering algorithm
         if alg == "Floyd-Steinberg":
-            self.dithered_image = self.floyd_steinberg_numpy(image_to_dither, thr, pixel_s)
+            self.dithered_image = self.floyd_steinberg_numpy(array_to_dither, thr, pixel_s)
         elif alg == "Simple Threshold":
-            self.dithered_image = self.simple_threshold(image_to_dither, thr, pixel_s)
+            self.dithered_image = self.simple_threshold(array_to_dither, thr, pixel_s)
         else:
             self.dithered_image = None
         
         # Update toggle button state
-        if self.dithered_image:
+        if self.dithered_image is not None:
             self.toggle_button.setEnabled(True)
             
             # If not showing original, update display with new dithered image
@@ -1563,15 +1543,14 @@ class DitherApp(QMainWindow):
     
     def save_image(self):
         """Save the current dithered image to a file"""
-        # Check if we have a dithered image to save (either from file or camera)
-        if not self.dithered_image:
+        # Check if we have a dithered image to save
+        if self.dithered_image is None:
             print("No image to save")
             return
         
         try:
             # Debug info about the image
-            print(f"Image to save: type={type(self.dithered_image)}, "
-                  f"mode={self.dithered_image.mode if hasattr(self.dithered_image, 'mode') else 'unknown'}")
+            print(f"Image to save: type={type(self.dithered_image)}, shape={getattr(self.dithered_image, 'shape', None)}")
             
             # Get save path with explicit file extension filters
             path, selected_filter = QFileDialog.getSaveFileName(
@@ -1593,43 +1572,40 @@ class DitherApp(QMainWindow):
             
             print(f"Saving to path: {path}")
             
-            # Ensure the image is in a format that can be saved
-            if hasattr(self.dithered_image, 'save'):
-                # Try to save with error handling
+            # Save NumPy array using OpenCV or another library
+            try:
+                # Import cv2 for image saving
+                import cv2
+                
+                # Make a copy to avoid modifying the original
+                save_array = self.dithered_image.copy()
+                
+                # Convert grayscale to 3-channel if needed for consistent saving
+                if len(save_array.shape) == 2:
+                    # This is a grayscale image
+                    # For saving, we can keep it as single channel
+                    pass
+                elif len(save_array.shape) == 3 and save_array.shape[2] == 3:
+                    # This is an RGB image - needs BGR conversion for OpenCV
+                    save_array = cv2.cvtColor(save_array, cv2.COLOR_RGB2BGR)
+                
+                # Save the image
+                cv2.imwrite(path, save_array)
+                print(f"Image saved successfully to {path}")
+            except ImportError:
+                # Fallback if OpenCV is not available
                 try:
-                    # Convert to RGB if needed
-                    if self.dithered_image.mode not in ['RGB', 'L']:
-                        save_img = self.dithered_image.convert('RGB')
-                        save_img.save(path)
-                    else:
-                        self.dithered_image.save(path)
-                    print(f"Image saved successfully to {path}")
+                    from matplotlib import pyplot as plt
+                    plt.imsave(path, self.dithered_image)
+                    print(f"Image saved with matplotlib to {path}")
                 except Exception as e:
-                    print(f"Error in PIL save: {e}")
+                    print(f"Error saving with matplotlib: {e}")
                     import traceback
                     traceback.print_exc()
-                    
-                    # Try alternative save method if the first fails
-                    try:
-                        # Convert to appropriate format if needed
-                        if self.dithered_image.mode not in ['RGB', 'L']:
-                            save_img = self.dithered_image.convert('RGB')
-                        else:
-                            save_img = self.dithered_image
-                            
-                        # Save with a specific format
-                        if path.lower().endswith('.png'):
-                            save_img.save(path, 'PNG')
-                        elif path.lower().endswith(('.jpg', '.jpeg')):
-                            save_img.save(path, 'JPEG')
-                        else:
-                            save_img.save(path)
-                            
-                        print(f"Image saved with alternative method to {path}")
-                    except Exception as e2:
-                        print(f"Alternative save also failed: {e2}")
-            else:
-                print(f"Error: dithered_image does not have save method: {type(self.dithered_image)}")
+            except Exception as e:
+                print(f"Error saving image: {e}")
+                import traceback
+                traceback.print_exc()
         except Exception as e:
             print(f"Error in save_image: {e}")
             import traceback
@@ -1711,17 +1687,13 @@ class DitherApp(QMainWindow):
     def apply_dither_to_array(self):
         """Apply dithering to the original array directly"""
         if not hasattr(self, 'original_array') or self.original_array is None:
-            # Fall back to PIL-based method if no array is available
+            # Fall back to array-based method if no array is available
             self.apply_dither()
             return
             
-        # In pass-through mode, just display the original array as an image
+        # In pass-through mode, just use the original array as the dithered image
         if self.pass_through_mode.isChecked():
-            if len(self.original_array.shape) == 3:
-                self.dithered_image = Image.fromarray(self.original_array, 'RGB')
-            else:
-                self.dithered_image = Image.fromarray(self.original_array, 'L')
-            
+            self.dithered_image = self.original_array.copy()
             self.showing_original = True
             self.toggle_button.setText("Switch to Dithered Image")
             self.toggle_button.setEnabled(True)
@@ -1733,7 +1705,7 @@ class DitherApp(QMainWindow):
         contrast_factor = self.contrast_slider.value() / 100.0
         pixel_s = self.scale_slider.value()
         
-        print(f"Applying {alg} with threshold {thr}, contrast {contrast_factor:.2f}, scale {pixel_s} directly to array")
+        print(f"Applying {alg} with threshold {thr}, contrast {contrast_factor:.2f}, scale {pixel_s}")
         
         # Make a copy to avoid modifying the original
         array_to_dither = self.original_array.copy()
@@ -1761,7 +1733,6 @@ class DitherApp(QMainWindow):
                 print("Applied contrast adjustment to array.")
             except Exception as e:
                 print(f"Error applying contrast: {e}")
-                import traceback
                 traceback.print_exc()
         
         # Apply selected dithering algorithm
@@ -1803,12 +1774,9 @@ class DitherApp(QMainWindow):
         else:
             result_array = array_to_dither  # Fallback
         
-        # Convert the result array to PIL Image for display
         if result_array is not None:
-            if len(result_array.shape) == 3:
-                self.dithered_image = Image.fromarray(result_array, 'RGB')
-            else:
-                self.dithered_image = Image.fromarray(result_array, 'L')
+            # Store result directly as numpy array
+            self.dithered_image = result_array
             
             # Update toggle button state
             self.toggle_button.setEnabled(True)
