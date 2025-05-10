@@ -600,6 +600,9 @@ class CameraCaptureThread(QThread):
                 array_to_dither = FRAME_BUFFER_PROCESSING
                 np.copyto(array_to_dither, array)
             
+            # Store original shape for ensuring correct upscaling
+            orig_shape = array_to_dither.shape
+            
             # Apply contrast if needed - only when contrast is significantly different from 1.0
             if abs(contrast_factor - 1.0) > 0.01:
                 try:
@@ -627,6 +630,7 @@ class CameraCaptureThread(QThread):
                     result = fs_dither(array_to_dither.astype(np.float32), mode, thr)
                 else:
                     # Use the optimized downscale-dither-upscale pipeline
+                    # This function already handles upscaling to the original size
                     result = downscale_dither_upscale(array_to_dither, thr, pixel_s, mode)
             elif alg == "Simple Threshold":
                 if pixel_s == 1:
@@ -639,8 +643,36 @@ class CameraCaptureThread(QThread):
                     # Use block-based approach
                     orig_h, orig_w = array_to_dither.shape[:2]
                     result = simple_threshold_dither(array_to_dither, mode, pixel_s, orig_w, orig_h, thr)
+                    
+                    # Check if we need to upscale the result for simple_threshold_dither
+                    # Since this function might not handle upscaling internally
+                    if mode == 'RGB':
+                        if result.shape[:2] != (orig_h, orig_w):
+                            # Create output array
+                            small_h, small_w = result.shape[:2]
+                            upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
+                            # Upscale using nearest neighbor interpolation
+                            result = nearest_upscale_rgb(result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                    else:  # Grayscale
+                        if result.shape != (orig_h, orig_w):
+                            # Create output array
+                            small_h, small_w = result.shape
+                            upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
+                            # Upscale using nearest neighbor interpolation
+                            result = nearest_upscale_gray(result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
             else:
                 result = array_to_dither  # Fallback
+                
+            # Ensure the result has the same shape as the original
+            if mode == 'RGB' and result.shape != orig_shape:
+                print(f"Warning: Camera frame result shape {result.shape} doesn't match original {orig_shape}")
+                # Attempt to fix the shape
+                if len(result.shape) == 2 and len(orig_shape) == 3:
+                    # Convert grayscale to RGB
+                    rgb_result = np.empty(orig_shape, dtype=np.uint8)
+                    for c in range(3):
+                        rgb_result[:,:,c] = result
+                    result = rgb_result
                 
             return result
         except Exception as e:
@@ -1298,6 +1330,7 @@ class DitherApp(QMainWindow):
             else:
                 # Create a copy of the original for processing
                 work_copy = FRAME_BUFFER_ORIGINAL.copy()
+                orig_shape = work_copy.shape  # Save original shape for upscaling later
                 
                 # Apply contrast adjustment if needed
                 if abs(contrast_factor - 1.0) > 0.01:
@@ -1312,6 +1345,7 @@ class DitherApp(QMainWindow):
                         if pixel_s == 1:
                             result = fs_dither(work_copy.astype(np.float32), 'RGB', thr)
                         else:
+                            # The downscale_dither_upscale function already handles upscaling
                             result = downscale_dither_upscale(work_copy, thr, pixel_s, 'RGB')
                     else:  # Simple Threshold
                         if pixel_s == 1:
@@ -1319,22 +1353,50 @@ class DitherApp(QMainWindow):
                         else:
                             orig_h, orig_w = work_copy.shape[:2]
                             result = simple_threshold_dither(work_copy, 'RGB', pixel_s, orig_w, orig_h, thr)
+                            
+                            # Check if we need to upscale the result
+                            if result.shape[:2] != (orig_h, orig_w):
+                                # Create output array
+                                small_h, small_w = result.shape[:2]
+                                upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
+                                # Upscale using nearest neighbor interpolation
+                                result = nearest_upscale_rgb(result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                 else:
                     # Process for Grayscale
                     # Convert to grayscale first
                     gray = np.dot(work_copy[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                    orig_h, orig_w = gray.shape
                     
                     if alg == "Floyd-Steinberg":
                         if pixel_s == 1:
                             result = fs_dither(gray.astype(np.float32), 'L', thr)
                         else:
+                            # The downscale_dither_upscale function already handles upscaling
                             result = downscale_dither_upscale(gray, thr, pixel_s, 'L')
                     else:  # Simple Threshold
                         if pixel_s == 1:
                             result = np.where(gray < thr, 0, 255).astype(np.uint8)
                         else:
-                            orig_h, orig_w = gray.shape
                             result = simple_threshold_dither(gray, 'L', pixel_s, orig_w, orig_h, thr)
+                            
+                            # Check if we need to upscale the result
+                            if result.shape != (orig_h, orig_w):
+                                # Create output array
+                                small_h, small_w = result.shape
+                                upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
+                                # Upscale using nearest neighbor interpolation
+                                result = nearest_upscale_gray(result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                
+                # Ensure the result has the same shape as the original
+                if self.rgb_mode.isChecked() and result.shape != orig_shape:
+                    print(f"Warning: Result shape {result.shape} doesn't match original {orig_shape}")
+                    # Attempt to fix the shape
+                    if len(result.shape) == 2 and len(orig_shape) == 3:
+                        # Convert grayscale to RGB
+                        rgb_result = np.empty(orig_shape, dtype=np.uint8)
+                        for c in range(3):
+                            rgb_result[:,:,c] = result
+                        result = rgb_result
                 
                 # Update output buffer
                 FRAME_BUFFER_OUTPUT = result
