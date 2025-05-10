@@ -15,6 +15,20 @@ from helper import (fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither
                    nearest_upscale_gray, downscale_dither_upscale, bgr_to_rgb, 
                    optimized_pass_through)
 
+# Global frame handling variables
+# These are used across the application to manage frame flow
+FRAME_BUFFER_ORIGINAL = None     # Original frame buffer (RGB format)
+FRAME_BUFFER_PROCESSING = None   # Buffer used during processing steps
+FRAME_BUFFER_OUTPUT = None       # Final frame after processing (to display)
+FRAME_BUFFER_GRAYSCALE = None    # Grayscale version when needed
+SHARED_ALGORITHM_BUFFER = None   # Shared buffer for all algorithms - prevents memory allocation lag
+
+# Frame handling metrics
+LAST_FRAME_TIME = 0              # Time when last frame was processed
+LAST_FPS = 0                     # Last calculated FPS
+FRAME_COUNT = 0                  # Frame counter for FPS calculation
+FRAME_PROCESS_TIME = 0           # Time spent processing the last frame
+
 # Try to import picamera only if available (for development on non-Pi platforms)
 try:
     from picamera2 import Picamera2
@@ -47,8 +61,10 @@ class CameraCaptureThread(QThread):
         self.camera_initialized = False
         self.camera_lock = threading.Lock()  # Add lock for thread safety
         
-        # Single buffer for frame operations
-        self.frame_buffer = None  # Will be initialized on first frame capture
+        # Use global buffer instead of local buffer
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_PROCESSING
+        global FRAME_BUFFER_OUTPUT
         
         # Simple timing control - adjusted for 30 FPS target
         self.last_capture_time = 0
@@ -125,7 +141,7 @@ class CameraCaptureThread(QThread):
                 self.current_pixel_scale = pixel_scale
                 
                 # Clear buffer to force recreation with new size
-                self.frame_buffer = None
+                FRAME_BUFFER_ORIGINAL = None
                 
                 return True
                 
@@ -203,6 +219,16 @@ class CameraCaptureThread(QThread):
             return
         
         self.is_running = True
+        
+        # Access global frame buffers
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_PROCESSING
+        global FRAME_BUFFER_OUTPUT
+        global FRAME_BUFFER_GRAYSCALE
+        global LAST_FRAME_TIME
+        global FRAME_COUNT
+        global LAST_FPS
+        global FRAME_PROCESS_TIME
         
         try:
             # Try to initialize camera with a simpler approach
@@ -339,18 +365,18 @@ class CameraCaptureThread(QThread):
                         # Simple BGR to RGB conversion with NumPy - more efficient than loading OpenCV
                         frame = frame[:, :, ::-1].copy()  # Reverse the color channels
                         
-                        # Reuse single buffer if possible
-                        if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
-                            self.frame_buffer = np.empty_like(frame)
-                        np.copyto(self.frame_buffer, frame)
+                        # Use global buffer instead of thread-local buffer
+                        if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != frame.shape:
+                            FRAME_BUFFER_ORIGINAL = np.empty_like(frame)
+                        np.copyto(FRAME_BUFFER_ORIGINAL, frame)
                         
                         # Process based on mode
                         if self.app.pass_through_mode.isChecked():
                             # For pass-through mode, emit the RGB frame
                             pt_start = time.time()
                             
-                            # Emit the RGB-converted frame instead of the original BGR frame
-                            self.frameProcessed.emit(self.frame_buffer)  # frame_buffer is already RGB
+                            # Emit the frame directly from global buffer
+                            self.frameProcessed.emit(FRAME_BUFFER_ORIGINAL)  # already RGB
                             
                             # Report pass-through processing time
                             pt_time = (time.time() - pt_start) * 1000  # Convert to ms
@@ -358,19 +384,31 @@ class CameraCaptureThread(QThread):
                                 print(f"Pass-through processing time: {pt_time:.3f}ms")
                         elif self.app.rgb_mode.isChecked():
                             # RGB mode
-                            processed_array = self.process_frame_array(self.frame_buffer, 'RGB')
+                            processed_array = self.process_frame_array(FRAME_BUFFER_ORIGINAL, 'RGB')
                             if processed_array is not None:
+                                # Store result in global output buffer
+                                if FRAME_BUFFER_OUTPUT is None or FRAME_BUFFER_OUTPUT.shape != processed_array.shape:
+                                    FRAME_BUFFER_OUTPUT = np.empty_like(processed_array)
+                                np.copyto(FRAME_BUFFER_OUTPUT, processed_array)
                                 # Send NumPy array directly to UI
-                                self.frameProcessed.emit(processed_array)
+                                self.frameProcessed.emit(FRAME_BUFFER_OUTPUT)
                         else:
-                            # Create grayscale version directly in the buffer with weighted average
-                            gray = np.dot(self.frame_buffer[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                            # Create grayscale version directly in the global buffer with weighted average
+                            if FRAME_BUFFER_GRAYSCALE is None or FRAME_BUFFER_GRAYSCALE.shape != (frame.shape[0], frame.shape[1]):
+                                FRAME_BUFFER_GRAYSCALE = np.empty((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+                            
+                            # Calculate grayscale with weighted average
+                            FRAME_BUFFER_GRAYSCALE = np.dot(FRAME_BUFFER_ORIGINAL[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
                             
                             # Process grayscale
-                            processed_array = self.process_frame_array(gray, 'L')
+                            processed_array = self.process_frame_array(FRAME_BUFFER_GRAYSCALE, 'L')
                             if processed_array is not None:
+                                # Store result in global output buffer
+                                if FRAME_BUFFER_OUTPUT is None or FRAME_BUFFER_OUTPUT.shape != processed_array.shape:
+                                    FRAME_BUFFER_OUTPUT = np.empty_like(processed_array)
+                                np.copyto(FRAME_BUFFER_OUTPUT, processed_array)
                                 # Send NumPy array directly to UI
-                                self.frameProcessed.emit(processed_array)
+                                self.frameProcessed.emit(FRAME_BUFFER_OUTPUT)
                     else:
                         print(f"Invalid frame format: {frame.shape if frame is not None else None}")
                     
@@ -428,18 +466,21 @@ class CameraCaptureThread(QThread):
             contrast_factor = self.app.contrast_slider.value() / 100.0
             pixel_s = self.app.scale_slider.value()
             
+            # Access global processing buffer
+            global FRAME_BUFFER_PROCESSING
+            
             # Fast path for very small images - avoid unnecessary buffer allocation
             is_small = array.size < 100000  # Reduced threshold for better performance
             
-            # Optimize array reuse - only allocate when necessary
+            # Optimize array reuse using global buffer
             if is_small:
                 # For small images, direct copy is faster than empty_like + copyto
                 array_to_dither = array.copy()
             else:
-                # For larger images, reuse existing buffer when possible
-                if not hasattr(self, 'dither_buffer') or self.dither_buffer is None or self.dither_buffer.shape != array.shape:
-                    self.dither_buffer = np.empty_like(array)
-                array_to_dither = self.dither_buffer
+                # For larger images, reuse existing global buffer when possible
+                if FRAME_BUFFER_PROCESSING is None or FRAME_BUFFER_PROCESSING.shape != array.shape:
+                    FRAME_BUFFER_PROCESSING = np.empty_like(array)
+                array_to_dither = FRAME_BUFFER_PROCESSING
                 np.copyto(array_to_dither, array)
             
             # Apply contrast if needed - only when contrast is significantly different from 1.0
@@ -547,8 +588,10 @@ class FrameProcessingThread(QThread):
         self.app = app_instance  # Reference to the main app for dithering settings
         print("Processing thread initialized")
         
-        # Single buffer for all frame operations
-        self.frame_buffer = None
+        # Access global buffers instead of creating thread-local buffers
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_PROCESSING
+        global FRAME_BUFFER_OUTPUT
         
         # Thread synchronization - detect if we're falling behind
         self.processed_count = 0
@@ -559,6 +602,16 @@ class FrameProcessingThread(QThread):
     def run(self):
         print("Frame processing thread starting...")
         self.is_running = True
+        
+        # Access global buffers
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_PROCESSING
+        global FRAME_BUFFER_OUTPUT
+        global FRAME_BUFFER_GRAYSCALE
+        global LAST_FRAME_TIME
+        global FRAME_COUNT
+        global LAST_FPS
+        global FRAME_PROCESS_TIME
         
         # Performance tracking
         frames_processed = 0
@@ -591,30 +644,38 @@ class FrameProcessingThread(QThread):
                 # Make sure we have a proper RGB frame
                 if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 3:
                     try:
-                        # Reuse buffer if possible
-                        if self.frame_buffer is None or self.frame_buffer.shape != frame.shape:
-                            self.frame_buffer = np.empty_like(frame)
-                        np.copyto(self.frame_buffer, frame)
+                        # Store in global original buffer
+                        if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != frame.shape:
+                            FRAME_BUFFER_ORIGINAL = np.empty_like(frame)
+                        np.copyto(FRAME_BUFFER_ORIGINAL, frame)
                         
                         # Fast path for pass-through mode
                         if self.app.pass_through_mode.isChecked():
-                            # In pass-through mode, just emit the RGB frame directly
+                            # In pass-through mode, just emit the RGB frame directly from global buffer
                             if self.is_running:
-                                self.frameProcessed.emit(self.frame_buffer)
+                                self.frameProcessed.emit(FRAME_BUFFER_ORIGINAL)
                         else:
                             # Process with minimum memory allocations
                             if not self.app.rgb_mode.isChecked():
-                                # Create grayscale version directly in the buffer
-                                gray = np.dot(self.frame_buffer[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                                # Create grayscale version in global grayscale buffer
+                                if FRAME_BUFFER_GRAYSCALE is None or FRAME_BUFFER_GRAYSCALE.shape != (frame.shape[0], frame.shape[1]):
+                                    FRAME_BUFFER_GRAYSCALE = np.empty((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+                                
+                                # Calculate grayscale with weighted average
+                                FRAME_BUFFER_GRAYSCALE = np.dot(FRAME_BUFFER_ORIGINAL[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
                                 
                                 # Process grayscale NumPy array directly
-                                processed_array = self.process_frame_array(gray, 'L')
+                                processed_array = self.process_frame_array(FRAME_BUFFER_GRAYSCALE, 'L')
                             else:
                                 # Process RGB NumPy array directly
-                                processed_array = self.process_frame_array(self.frame_buffer, 'RGB')
+                                processed_array = self.process_frame_array(FRAME_BUFFER_ORIGINAL, 'RGB')
                             
                             if processed_array is not None and self.is_running:
-                                self.frameProcessed.emit(processed_array)
+                                # Store result in global output buffer
+                                if FRAME_BUFFER_OUTPUT is None or FRAME_BUFFER_OUTPUT.shape != processed_array.shape:
+                                    FRAME_BUFFER_OUTPUT = np.empty_like(processed_array)
+                                np.copyto(FRAME_BUFFER_OUTPUT, processed_array)
+                                self.frameProcessed.emit(FRAME_BUFFER_OUTPUT)
                     except Exception as e:
                         print(f"Error processing frame: {e}")
                 else:
@@ -650,18 +711,21 @@ class FrameProcessingThread(QThread):
             contrast_factor = self.app.contrast_slider.value() / 100.0
             pixel_s = self.app.scale_slider.value()
             
+            # Access global processing buffer
+            global FRAME_BUFFER_PROCESSING
+            
             # Fast path for very small images - avoid unnecessary buffer allocation
             is_small = array.size < 100000  # Reduced threshold for better performance
             
-            # Optimize array reuse - only allocate when necessary
+            # Optimize array reuse using global buffer
             if is_small:
                 # For small images, direct copy is faster than empty_like + copyto
                 array_to_dither = array.copy()
             else:
-                # For larger images, reuse existing buffer when possible
-                if not hasattr(self, 'dither_buffer') or self.dither_buffer is None or self.dither_buffer.shape != array.shape:
-                    self.dither_buffer = np.empty_like(array)
-                array_to_dither = self.dither_buffer
+                # For larger images, reuse existing global buffer when possible
+                if FRAME_BUFFER_PROCESSING is None or FRAME_BUFFER_PROCESSING.shape != array.shape:
+                    FRAME_BUFFER_PROCESSING = np.empty_like(array)
+                array_to_dither = FRAME_BUFFER_PROCESSING
                 np.copyto(array_to_dither, array)
             
             # Apply contrast if needed - only when contrast is significantly different from 1.0
@@ -844,10 +908,23 @@ class DitherApp(QMainWindow):
         self.setWindowTitle(config.APP_NAME)
         self.resize(1200, 800)
         
-        # Main image buffers - these buffers are reused for all operations
-        self.original_array = None    # Original image as NumPy array (RGB)
-        self.dithered_image = None    # Dithered result as NumPy array
-        self.main_buffer = None       # Reusable work buffer for processing
+        # Use global buffers instead of instance-specific buffers
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_PROCESSING
+        global FRAME_BUFFER_OUTPUT
+        global FRAME_BUFFER_GRAYSCALE
+        global SHARED_ALGORITHM_BUFFER
+        global LAST_FRAME_TIME
+        global FRAME_COUNT
+        
+        # Set initial values
+        FRAME_BUFFER_ORIGINAL = None
+        FRAME_BUFFER_PROCESSING = None
+        FRAME_BUFFER_OUTPUT = None
+        FRAME_BUFFER_GRAYSCALE = None
+        SHARED_ALGORITHM_BUFFER = None
+        LAST_FRAME_TIME = time.time()
+        FRAME_COUNT = 0
         
         self.showing_original = False # Show dithered version first by default
         
@@ -1170,8 +1247,8 @@ class DitherApp(QMainWindow):
             
             # Clear current image
             self.showing_original = False
-            self.original_array = None
-            self.dithered_image = None
+            FRAME_BUFFER_ORIGINAL = None
+            FRAME_BUFFER_OUTPUT = None
             self.toggle_button.setEnabled(False)
             
             print("Camera mode started successfully")
@@ -1263,6 +1340,9 @@ class DitherApp(QMainWindow):
     
     def update_camera_frame(self, dithered_img):
         """Update the UI with the processed camera frame"""
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_OUTPUT
+        
         if not self.camera_mode_active:
             print("Camera not active, frame update ignored")
             return
@@ -1280,7 +1360,12 @@ class DitherApp(QMainWindow):
             if self.capture_frame_requested:
                 print("Captured frame received")
                 self.capture_frame_requested = False  # Reset flag
-                self.original_array = dithered_img.copy()
+                
+                # Store in global original buffer
+                if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != dithered_img.shape:
+                    FRAME_BUFFER_ORIGINAL = np.empty_like(dithered_img)
+                np.copyto(FRAME_BUFFER_ORIGINAL, dithered_img)
+                
                 print(f"Frame captured: array shape={dithered_img.shape}")
                 print("Stopping camera after frame capture...")
                 self.stop_camera()
@@ -1296,8 +1381,8 @@ class DitherApp(QMainWindow):
                 except Exception as e:
                     print(f"Additional cleanup error (non-critical): {e}")
                 print("Applying dithering to captured frame...")
-                self.apply_dither_to_array()
-                if self.dithered_image is not None:
+                self.apply_dither()
+                if FRAME_BUFFER_OUTPUT is not None:
                     self.save_button.setEnabled(True)
                     self.toggle_button.setEnabled(True)
                     print("Dithering applied successfully")
@@ -1307,13 +1392,21 @@ class DitherApp(QMainWindow):
             
             # For normal camera display, update the display
             self.image_viewer.update_frame(dithered_img)
-            self.dithered_image = dithered_img
+            
+            # Store current output in global buffer
+            if FRAME_BUFFER_OUTPUT is None or FRAME_BUFFER_OUTPUT.shape != dithered_img.shape:
+                FRAME_BUFFER_OUTPUT = np.empty_like(dithered_img)
+            np.copyto(FRAME_BUFFER_OUTPUT, dithered_img)
+            
             self.save_button.setEnabled(True)
         else:
             print("Warning: Received None image in update_camera_frame")
     
     def toggle_image_display(self):
-        if not self.original_array or not self.dithered_image:
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_OUTPUT
+        
+        if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_OUTPUT is None:
             return
         
         # Update showing_original flag
@@ -1324,14 +1417,16 @@ class DitherApp(QMainWindow):
             self.pass_through_mode.setChecked(False)
         
         if self.showing_original:
-            self.display_image(self.original_array)
+            self.display_image(FRAME_BUFFER_ORIGINAL)
             self.toggle_button.setText("Switch to Dithered Image")
         else:
-            self.display_image(self.dithered_image)
+            self.display_image(FRAME_BUFFER_OUTPUT)
             self.toggle_button.setText("Switch to Original Image")
     
     def open_image(self):
         """Open an image file and convert to NumPy array"""
+        global FRAME_BUFFER_ORIGINAL
+        
         # Ensure camera is stopped first
         if self.camera_mode_active:
             self.stop_camera()
@@ -1350,20 +1445,27 @@ class DitherApp(QMainWindow):
             if img_array is None:
                 raise ValueError(f"Failed to load image from {path}")
                 
-            # Convert BGR to RGB using NumPy slicing
-            self.original_array = img_array[:, :, ::-1]  # BGR to RGB conversion
-            print(f"Loaded image from {path}, shape={self.original_array.shape}")
+            # Convert BGR to RGB using NumPy slicing and store in global buffer
+            img_array_rgb = img_array[:, :, ::-1]  # BGR to RGB conversion
+            
+            # Store in global original buffer
+            if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != img_array_rgb.shape:
+                FRAME_BUFFER_ORIGINAL = np.empty_like(img_array_rgb)
+            np.copyto(FRAME_BUFFER_ORIGINAL, img_array_rgb)
+            
+            print(f"Loaded image from {path}, shape={FRAME_BUFFER_ORIGINAL.shape}")
             
             # Convert to grayscale if needed based on current mode
-            if not self.rgb_mode.isChecked() and len(self.original_array.shape) == 3:
+            if not self.rgb_mode.isChecked() and len(FRAME_BUFFER_ORIGINAL.shape) == 3:
                 # Convert to grayscale using NumPy weighted average
-                self.original_array = np.dot(self.original_array[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                gray = np.dot(FRAME_BUFFER_ORIGINAL[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                FRAME_BUFFER_ORIGINAL = gray
             
             # Apply dithering directly to array
-            self.apply_dither_to_array()
+            self.apply_dither()
             self.image_viewer.set_zoom_level(1.0) # Reset zoom for the new image view
 
-            if self.dithered_image is not None:
+            if FRAME_BUFFER_OUTPUT is not None:
                 # Dithering was successful
                 self.toggle_button.setText("Switch to Original Image")
                 self.save_button.setEnabled(True)
@@ -1372,7 +1474,7 @@ class DitherApp(QMainWindow):
             else:
                 # Initial dithering failed, fall back to showing original
                 self.showing_original = True
-                self.display_image(self.original_array)
+                self.display_image(FRAME_BUFFER_ORIGINAL)
                 self.toggle_button.setText("Switch to Dithered Image")
                 self.save_button.setEnabled(False)
                 self.toggle_button.setEnabled(False)
@@ -1381,9 +1483,9 @@ class DitherApp(QMainWindow):
             print(f"Error opening image: {e}")
             import traceback
             traceback.print_exc()
-            self.original_array = None
-            self.dithered_image = None
-            self.image_viewer.set_image(None)
+            FRAME_BUFFER_ORIGINAL = None
+            FRAME_BUFFER_OUTPUT = None
+            self.image_viewer.set_image(None) 
             self.save_button.setEnabled(False)
             self.toggle_button.setEnabled(False)
             self.showing_original = False
@@ -1415,7 +1517,7 @@ class DitherApp(QMainWindow):
             import traceback
             traceback.print_exc()
             self.image_viewer.set_image(None)
-
+    
     def threshold_changed(self, value):
         self.threshold_label.setText(f"Threshold: {value}")
         if self.auto_render.isChecked():
@@ -1433,6 +1535,23 @@ class DitherApp(QMainWindow):
             self.apply_dither()
     
     def algorithm_changed(self):
+        # Pre-allocate shared buffer if needed based on algorithm
+        global SHARED_ALGORITHM_BUFFER, FRAME_BUFFER_PROCESSING
+        
+        # If we have a processing buffer, ensure shared buffer is ready
+        if FRAME_BUFFER_PROCESSING is not None:
+            alg = self.algorithm_combo.currentText()
+            
+            if alg == "Floyd-Steinberg":
+                # Float32 for Floyd-Steinberg
+                SHARED_ALGORITHM_BUFFER = np.empty_like(FRAME_BUFFER_PROCESSING, dtype=np.float32)
+                print("Pre-allocated float32 buffer for Floyd-Steinberg")
+            else:
+                # Uint8 for Simple Threshold
+                SHARED_ALGORITHM_BUFFER = np.empty_like(FRAME_BUFFER_PROCESSING, dtype=np.uint8)
+                print("Pre-allocated uint8 buffer for Simple Threshold")
+        
+        # Continue with render if auto-render is on
         if self.auto_render.isChecked():
             self.apply_dither()
     
@@ -1444,21 +1563,31 @@ class DitherApp(QMainWindow):
             print("Applying RGB mode change to camera feed")
             
         # Apply dithering to static images if auto-render is on
-        if self.auto_render.isChecked() and self.original_array is not None:
+        if self.auto_render.isChecked() and FRAME_BUFFER_ORIGINAL is not None:
             self.apply_dither()
     
     def apply_dither(self):
         """Apply selected dithering algorithm to the original image"""
-        if self.original_array is None:
+        # Use global buffers
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_PROCESSING
+        global FRAME_BUFFER_OUTPUT
+        
+        # Original array is stored in the global buffer
+        if FRAME_BUFFER_ORIGINAL is None:
             return
         
         # In pass-through mode, just display the original image
         if self.pass_through_mode.isChecked():
-            self.dithered_image = self.original_array.copy()
+            # Copy original to output
+            if FRAME_BUFFER_OUTPUT is None or FRAME_BUFFER_OUTPUT.shape != FRAME_BUFFER_ORIGINAL.shape:
+                FRAME_BUFFER_OUTPUT = np.empty_like(FRAME_BUFFER_ORIGINAL)
+            np.copyto(FRAME_BUFFER_OUTPUT, FRAME_BUFFER_ORIGINAL)
+            
             self.showing_original = True
             self.toggle_button.setText("Switch to Dithered Image")
             self.toggle_button.setEnabled(True)
-            self.display_image(self.dithered_image)
+            self.display_image(FRAME_BUFFER_OUTPUT)
             return
         
         alg = self.algorithm_combo.currentText()
@@ -1468,28 +1597,28 @@ class DitherApp(QMainWindow):
         
         print(f"Applying {alg} with threshold {thr}, contrast {contrast_factor:.2f}, scale {pixel_s}")
         
-        # Reuse the main processing buffer or create if needed
-        if self.main_buffer is None or self.main_buffer.shape != self.original_array.shape:
-            self.main_buffer = np.empty_like(self.original_array)
+        # Reuse the global processing buffer
+        if FRAME_BUFFER_PROCESSING is None or FRAME_BUFFER_PROCESSING.shape != FRAME_BUFFER_ORIGINAL.shape:
+            FRAME_BUFFER_PROCESSING = np.empty_like(FRAME_BUFFER_ORIGINAL)
         
         # Copy original data to work buffer
-        np.copyto(self.main_buffer, self.original_array)
+        np.copyto(FRAME_BUFFER_PROCESSING, FRAME_BUFFER_ORIGINAL)
         
         # Apply contrast if needed
         if abs(contrast_factor - 1.0) > 0.01:
             try:
                 # Apply contrast directly to NumPy array
-                if len(self.main_buffer.shape) == 3:  # RGB
+                if len(FRAME_BUFFER_PROCESSING.shape) == 3:  # RGB
                     # Apply to each channel separately
                     for c in range(3):
-                        channel = self.main_buffer[:,:,c].astype(np.float32)
+                        channel = FRAME_BUFFER_PROCESSING[:,:,c].astype(np.float32)
                         # Simple contrast adjustment formula: f(x) = 128 + contrast_factor * (x - 128)
                         channel = 128 + contrast_factor * (channel - 128)
-                        self.main_buffer[:,:,c] = np.clip(channel, 0, 255).astype(np.uint8)
+                        FRAME_BUFFER_PROCESSING[:,:,c] = np.clip(channel, 0, 255).astype(np.uint8)
                 else:  # Grayscale
-                    self.main_buffer = self.main_buffer.astype(np.float32)
-                    self.main_buffer = 128 + contrast_factor * (self.main_buffer - 128)
-                    self.main_buffer = np.clip(self.main_buffer, 0, 255).astype(np.uint8)
+                    FRAME_BUFFER_PROCESSING = FRAME_BUFFER_PROCESSING.astype(np.float32)
+                    FRAME_BUFFER_PROCESSING = 128 + contrast_factor * (FRAME_BUFFER_PROCESSING - 128)
+                    FRAME_BUFFER_PROCESSING = np.clip(FRAME_BUFFER_PROCESSING, 0, 255).astype(np.uint8)
                 print("Applied contrast adjustment.")
             except Exception as e:
                 print(f"Error applying contrast: {e}")
@@ -1497,24 +1626,33 @@ class DitherApp(QMainWindow):
         
         # Apply selected dithering algorithm
         if alg == "Floyd-Steinberg":
-            self.dithered_image = self.floyd_steinberg_numpy(self.main_buffer, thr, pixel_s)
+            result_array = self.floyd_steinberg_numpy(FRAME_BUFFER_PROCESSING, thr, pixel_s)
         elif alg == "Simple Threshold":
-            self.dithered_image = self.simple_threshold(self.main_buffer, thr, pixel_s)
+            result_array = self.simple_threshold(FRAME_BUFFER_PROCESSING, thr, pixel_s)
         else:
-            self.dithered_image = None
+            result_array = None
+        
+        # Store result in global output buffer
+        if result_array is not None:
+            if FRAME_BUFFER_OUTPUT is None or FRAME_BUFFER_OUTPUT.shape != result_array.shape:
+                FRAME_BUFFER_OUTPUT = np.empty_like(result_array)
+            np.copyto(FRAME_BUFFER_OUTPUT, result_array)
         
         # Update toggle button state
-        if self.dithered_image is not None:
             self.toggle_button.setEnabled(True)
             
             # If not showing original, update display with new dithered image
             if not self.showing_original:
-                self.display_image(self.dithered_image)
+                self.display_image(FRAME_BUFFER_OUTPUT)
+        else:
+            print("Error: Dithering result is None")
     
     def save_image(self):
         """Save the current dithered image to a file"""
+        global FRAME_BUFFER_OUTPUT
+        
         # Check if we have a dithered image to save
-        if self.dithered_image is None:
+        if FRAME_BUFFER_OUTPUT is None:
             print("No image to save")
             return
         
@@ -1535,13 +1673,13 @@ class DitherApp(QMainWindow):
                     path.lower().endswith('.jpeg')):
                 path += '.png'
             
-            print(f"Saving image to {path}, shape={self.dithered_image.shape}")
+            print(f"Saving image to {path}, shape={FRAME_BUFFER_OUTPUT.shape}")
             
             # Use OpenCV for saving - simple and direct
             import cv2
             
             # Make a copy to avoid modifying the original
-            save_array = self.dithered_image.copy()
+            save_array = FRAME_BUFFER_OUTPUT.copy()
             
             # Convert RGB to BGR for OpenCV if it's a color image
             if len(save_array.shape) == 3 and save_array.shape[2] == 3:
@@ -1558,15 +1696,30 @@ class DitherApp(QMainWindow):
     def floyd_steinberg_numpy(self, array, threshold=128, pixel_scale=1):
         if pixel_scale <= 0:
             pixel_scale = 1
+            
+        # Access shared algorithm buffer
+        global SHARED_ALGORITHM_BUFFER
+        
         if self.rgb_mode.isChecked():
             mode = 'RGB'
         else:
             mode = 'L'
+            
         if pixel_scale == 1:
-            arr = array.astype(np.float32)
-            arr = fs_dither(arr, mode, threshold)
-            return arr.astype(np.uint8)
+            # Ensure shared buffer is allocated and correct size
+            if SHARED_ALGORITHM_BUFFER is None or SHARED_ALGORITHM_BUFFER.shape != array.shape:
+                SHARED_ALGORITHM_BUFFER = np.empty_like(array, dtype=np.float32)
+            
+            # Copy input to shared buffer
+            np.copyto(SHARED_ALGORITHM_BUFFER, array)
+            
+            # Apply dithering to shared buffer
+            result = fs_dither(SHARED_ALGORITHM_BUFFER, mode, threshold)
+            
+            # Return result directly - it's the same buffer
+            return result
         else:
+            # For pixel scaling, use existing implementation
             arr = array.astype(np.uint8)
             result_arr = downscale_dither_upscale(arr, threshold, pixel_scale, mode)
             return result_arr
@@ -1574,21 +1727,35 @@ class DitherApp(QMainWindow):
     def simple_threshold(self, array, threshold=128, pixel_scale=1):
         if pixel_scale <= 0:
             pixel_scale = 1
+            
+        # Access shared algorithm buffer
+        global SHARED_ALGORITHM_BUFFER
+        
         if self.rgb_mode.isChecked():
             type = 'RGB'
         else:
             type = 'L'
-        img_array = array.astype(np.uint8)
+            
         if pixel_scale == 1:
+            # Ensure shared buffer is allocated and correct size
+            if SHARED_ALGORITHM_BUFFER is None or SHARED_ALGORITHM_BUFFER.shape != array.shape:
+                SHARED_ALGORITHM_BUFFER = np.empty_like(array, dtype=np.uint8)
+                
+            # Copy input to shared buffer
+            np.copyto(SHARED_ALGORITHM_BUFFER, array)
+                
             if type == 'RGB':
-                result = simple_threshold_rgb_ps1(img_array, threshold)
-                return result.astype(np.uint8)
-            else:
-                result = np.where(img_array < threshold, 0, 255).astype(np.uint8)
+                # Process directly in shared buffer
+                result = simple_threshold_rgb_ps1(SHARED_ALGORITHM_BUFFER, threshold)
                 return result
+            else:
+                # For grayscale, use vectorized operations on shared buffer
+                np.where(SHARED_ALGORITHM_BUFFER < threshold, 0, 255, out=SHARED_ALGORITHM_BUFFER)
+                return SHARED_ALGORITHM_BUFFER
         else:
-            orig_h, orig_w = img_array.shape[:2]
-            out_array = simple_threshold_dither(img_array, type, pixel_scale, orig_w, orig_h, threshold)
+            # For pixel scaling, use existing implementation
+            orig_h, orig_w = array.shape[:2]
+            out_array = simple_threshold_dither(array, type, pixel_scale, orig_w, orig_h, threshold)
             return out_array
 
     def handle_zoom_slider_change(self, value):
@@ -1610,7 +1777,7 @@ class DitherApp(QMainWindow):
         # Update splitter ratio when window is resized
         total_width = self.width()
         self.splitter.setSizes([int(total_width * 0.8), int(total_width * 0.2)])
-        
+
     def closeEvent(self, event):
         """Called when the application is closing, ensures threads are stopped"""
         print("Application closing, cleaning up resources...")
@@ -1628,113 +1795,6 @@ class DitherApp(QMainWindow):
         print("Cleanup complete, closing application")
         event.accept()
 
-    def apply_dither_to_array(self):
-        """Apply dithering to the original array directly"""
-        if not hasattr(self, 'original_array') or self.original_array is None:
-            # Fall back to array-based method if no array is available
-            self.apply_dither()
-            return
-            
-        # In pass-through mode, just use the original array as the dithered image
-        if self.pass_through_mode.isChecked():
-            self.dithered_image = self.original_array.copy()
-            self.showing_original = True
-            self.toggle_button.setText("Switch to Dithered Image")
-            self.toggle_button.setEnabled(True)
-            self.display_image(self.dithered_image)
-            return
-        
-        alg = self.algorithm_combo.currentText()
-        thr = self.threshold_slider.value()
-        contrast_factor = self.contrast_slider.value() / 100.0
-        pixel_s = self.scale_slider.value()
-        
-        print(f"Applying {alg} with threshold {thr}, contrast {contrast_factor:.2f}, scale {pixel_s}")
-        
-        # Reuse the main processing buffer or create if needed
-        if self.main_buffer is None or self.main_buffer.shape != self.original_array.shape:
-            self.main_buffer = np.empty_like(self.original_array)
-        
-        # Copy original data to work buffer
-        np.copyto(self.main_buffer, self.original_array)
-        
-        # Apply contrast if needed directly on NumPy array
-        if abs(contrast_factor - 1.0) > 0.01:
-            try:
-                # Convert to float32 for calculations
-                if self.rgb_mode.isChecked():
-                    # Apply to each channel separately
-                    for c in range(3):
-                        channel = self.main_buffer[:,:,c].astype(np.float32)
-                        # Simple contrast adjustment formula: f(x) = 128 + contrast_factor * (x - 128)
-                        channel = 128 + contrast_factor * (channel - 128)
-                        self.main_buffer[:,:,c] = np.clip(channel, 0, 255).astype(np.uint8)
-                else:
-                    # For grayscale, first convert RGB to gray
-                    if len(self.main_buffer.shape) == 3:
-                        gray = np.dot(self.main_buffer[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.float32)
-                    else:
-                        gray = self.main_buffer.astype(np.float32)
-                    # Apply contrast
-                    gray = 128 + contrast_factor * (gray - 128)
-                    self.main_buffer = np.clip(gray, 0, 255).astype(np.uint8)
-                print("Applied contrast adjustment to array.")
-            except Exception as e:
-                print(f"Error applying contrast: {e}")
-                traceback.print_exc()
-        
-        # Apply selected dithering algorithm
-        if alg == "Floyd-Steinberg":
-            if self.rgb_mode.isChecked():
-                mode = 'RGB'
-            else:
-                mode = 'L'
-                # Convert to grayscale if still in RGB
-                if len(self.main_buffer.shape) == 3:
-                    self.main_buffer = np.dot(self.main_buffer[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
-            
-            if pixel_s == 1:
-                # Apply dithering directly
-                result_array = fs_dither(self.main_buffer.astype(np.float32), mode, thr)
-            else:
-                # Use the optimized downscale-dither-upscale pipeline
-                result_array = downscale_dither_upscale(self.main_buffer, thr, pixel_s, mode)
-        
-        elif alg == "Simple Threshold":
-            if self.rgb_mode.isChecked():
-                mode = 'RGB'
-            else:
-                mode = 'L'
-                # Convert to grayscale if still in RGB
-                if len(self.main_buffer.shape) == 3:
-                    self.main_buffer = np.dot(self.main_buffer[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
-            
-            if pixel_s == 1:
-                # Apply simple threshold directly
-                if mode == 'RGB':
-                    result_array = simple_threshold_rgb_ps1(self.main_buffer, thr)
-                else:
-                    result_array = np.where(self.main_buffer < thr, 0, 255).astype(np.uint8)
-            else:
-                # Use block-based approach
-                orig_h, orig_w = self.main_buffer.shape[:2]
-                result_array = simple_threshold_dither(self.main_buffer, mode, pixel_s, orig_w, orig_h, thr)
-        else:
-            result_array = self.main_buffer  # Fallback
-        
-        if result_array is not None:
-            # Store result directly as numpy array
-            self.dithered_image = result_array
-            
-            # Update toggle button state
-            self.toggle_button.setEnabled(True)
-            
-            # If not showing original, update display with new dithered image
-            if not self.showing_original:
-                self.display_image(self.dithered_image)
-        else:
-            print("Error: Dithering result is None")
-
     def pass_through_changed(self):
         """Called when the Pass-through checkbox state changes"""
         print(f"Pass-through mode changed to: {self.pass_through_mode.isChecked()}")
@@ -1744,10 +1804,10 @@ class DitherApp(QMainWindow):
             print("Applying pass-through mode change to camera feed")
             
         # For static images, apply the change if auto-render is on
-        if self.auto_render.isChecked() and self.original_array is not None:
+        if self.auto_render.isChecked() and FRAME_BUFFER_ORIGINAL is not None:
             if self.pass_through_mode.isChecked():
                 # In pass-through mode, display original image
-                self.display_image(self.original_array)
+                self.display_image(FRAME_BUFFER_ORIGINAL)
                 self.showing_original = True
                 self.toggle_button.setText("Switch to Dithered Image")
             else:
@@ -1756,7 +1816,26 @@ class DitherApp(QMainWindow):
                 self.showing_original = False
                 self.toggle_button.setText("Switch to Original Image")
 
-if __name__ == "__main__":
+def main():
+    """Main application entry point with initialization of global frame buffers"""
+    # Initialize global frame handling variables
+    global FRAME_BUFFER_ORIGINAL
+    global FRAME_BUFFER_PROCESSING
+    global FRAME_BUFFER_OUTPUT
+    global FRAME_BUFFER_GRAYSCALE
+    global SHARED_ALGORITHM_BUFFER
+    global LAST_FRAME_TIME
+    global FRAME_COUNT
+    
+    # Set initial values
+    FRAME_BUFFER_ORIGINAL = None
+    FRAME_BUFFER_PROCESSING = None
+    FRAME_BUFFER_OUTPUT = None
+    FRAME_BUFFER_GRAYSCALE = None
+    SHARED_ALGORITHM_BUFFER = None
+    LAST_FRAME_TIME = time.time()
+    FRAME_COUNT = 0
+    
     # Try to ensure clean camera state at application startup
     try:
         import os
@@ -1800,3 +1879,6 @@ if __name__ == "__main__":
     window = DitherApp()
     window.show()
     sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()
