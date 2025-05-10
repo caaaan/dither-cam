@@ -1325,17 +1325,14 @@ class DitherApp(QMainWindow):
             file_ext = file_ext[1:]
             
         # Generate filename with current date and time
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y/%m/%d_%H:%M:%S")
         filename = f"capture_{timestamp}.{file_ext}"
         file_path = os.path.join(public_folder, filename)
         
         try:
             # Save the image
-            from PIL import Image
-            if len(FRAME_BUFFER_ORIGINAL.shape) == 2:  # Grayscale
-                Image.fromarray(FRAME_BUFFER_ORIGINAL).save(file_path)
-            else:  # RGB
-                Image.fromarray(FRAME_BUFFER_ORIGINAL).save(file_path)
+            import cv2
+            cv2.imwrite(file_path, FRAME_BUFFER_ORIGINAL)
             print(f"Image auto-saved to {file_path}")
         except Exception as e:
             print(f"Error auto-saving image: {e}")
