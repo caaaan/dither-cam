@@ -542,7 +542,7 @@ class CameraCaptureThread(QThread):
                     
                     # Allow up to 30fps, but prevent intervals too small to be useful
                     # Removed the 0.2 second minimum which was limiting to 5 FPS
-                    self.min_capture_interval = max(0.005, min(0.033, self.min_capture_interval))
+                    self.min_capture_interval = max(0.005, min(0.016, self.min_capture_interval))
                     
                     # Update last capture time
                     self.last_capture_time = time.time()
