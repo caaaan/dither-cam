@@ -652,7 +652,8 @@ class CameraCaptureThread(QThread):
                     # Downscale using block averaging (simplified)
                     if mode == 'RGB':
                         # RGB block averaging
-                        small_arr = block_average_rgb(array_to_dither, small_h, small_w, orig_h, orig_w, pixel_s)
+                        small_arr = np.empty((small_h, small_w, 3), dtype=np.float32)
+                        small_arr = block_average_rgb(array_to_dither, small_arr, small_h, small_w, pixel_s)
                         
                         # Apply threshold to downscaled image
                         small_result = simple_threshold_rgb_ps1(small_arr, thr)
@@ -662,7 +663,8 @@ class CameraCaptureThread(QThread):
                         result = nearest_upscale_rgb(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                     else:
                         # Grayscale block averaging
-                        small_arr = block_average_gray(array_to_dither, small_h, small_w, orig_h, orig_w, pixel_s)
+                        small_arr = np.empty((small_h, small_w), dtype=np.float32)
+                        small_arr = block_average_gray(array_to_dither, small_arr, small_h, small_w, pixel_s)
                         
                         # Apply threshold to downscaled image
                         small_result = np.where(small_arr < thr, 0, 255).astype(np.uint8)
@@ -677,13 +679,15 @@ class CameraCaptureThread(QThread):
                     
                     if mode == 'RGB':
                         # RGB downscale
-                        small_arr = block_average_rgb(array_to_dither, small_h, small_w, orig_h, orig_w, pixel_s)
+                        small_arr = np.empty((small_h, small_w, 3), dtype=np.float32)
+                        small_arr = block_average_rgb(array_to_dither, small_arr, small_h, small_w, pixel_s)
                         # Upscale
                         upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
                         result = nearest_upscale_rgb(small_arr, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                     else:
                         # Grayscale downscale
-                        small_arr = block_average_gray(array_to_dither, small_h, small_w, orig_h, orig_w, pixel_s)
+                        small_arr = np.empty((small_h, small_w), dtype=np.float32)
+                        small_arr = block_average_gray(array_to_dither, small_arr, small_h, small_w, pixel_s)
                         # Upscale
                         upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
                         result = nearest_upscale_gray(small_arr, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
@@ -1407,7 +1411,8 @@ class DitherApp(QMainWindow):
                             small_w = max(1, orig_w // pixel_s)
                             
                             # Perform block averaging for downscaling
-                            small_arr = block_average_rgb(work_copy, small_h, small_w, orig_h, orig_w, pixel_s)
+                            small_arr = np.empty((small_h, small_w, 3), dtype=np.float32)
+                            small_arr = block_average_rgb(work_copy, small_arr, small_h, small_w, pixel_s)
                             
                             # Apply threshold to downscaled image
                             small_result = simple_threshold_rgb_ps1(small_arr, thr)
@@ -1431,7 +1436,8 @@ class DitherApp(QMainWindow):
                             small_w = max(1, orig_w // pixel_s)
                             
                             # Perform block averaging for downscaling
-                            small_arr = block_average_gray(gray, small_h, small_w, orig_h, orig_w, pixel_s)
+                            small_arr = np.empty((small_h, small_w), dtype=np.float32)
+                            small_arr = block_average_gray(gray, small_arr, small_h, small_w, pixel_s)
                             
                             # Apply threshold to downscaled image
                             small_result = np.where(small_arr < thr, 0, 255).astype(np.uint8)
