@@ -667,6 +667,51 @@ class FrameProcessingThread(QThread):
         
         print("Processing thread stopped")
 
+    def process_frame(self, pil_img):
+        """Apply dithering to a frame based on current app settings"""
+        try:
+            # Get current settings from main app
+            alg = self.app.algorithm_combo.currentText()
+            thr = self.app.threshold_slider.value()
+            contrast_factor = self.app.contrast_slider.value() / 100.0
+            pixel_s = self.app.scale_slider.value()
+            use_rgb = self.app.rgb_mode.isChecked()
+            
+            # Prepare the image format as needed
+            if use_rgb and pil_img.mode != 'RGB':
+                # Convert to RGB format
+                image_to_dither = pil_img.convert('RGB')
+            elif not use_rgb and pil_img.mode != 'L':
+                # Convert to grayscale format
+                image_to_dither = pil_img.convert('L')
+            else:
+                # Already in the right format
+                image_to_dither = pil_img
+            
+            # Apply contrast if needed
+            if abs(contrast_factor - 1.0) > 0.01:
+                try:
+                    enhancer = ImageEnhance.Contrast(image_to_dither)
+                    image_to_dither = enhancer.enhance(contrast_factor)
+                except Exception as e:
+                    print(f"Error applying contrast: {e}")
+                    # Continue with original image
+            
+            # Apply selected dithering algorithm
+            if alg == "Floyd-Steinberg":
+                result = self.app.floyd_steinberg_numpy(image_to_dither, thr, pixel_s)
+            elif alg == "Simple Threshold":
+                result = self.app.simple_threshold(image_to_dither, thr, pixel_s)
+            else:
+                result = image_to_dither  # Fallback
+                
+            return result
+        except Exception as e:
+            print(f"Error in process_frame: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def process_frame_array(self, array, mode):
         """Apply dithering directly to a NumPy array based on current app settings"""
         try:
@@ -761,8 +806,8 @@ class ImageViewer(QScrollArea):
         self.image_label.setStyleSheet("background-color: transparent; border: 1px solid #ddd;")
         
         self.setWidget(self.image_label)
-        self.setHorizontalScrollBarPolicy(QScrollArea.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(QScrollArea.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         
         self.original_pixmap = None
         self.zoom_factor = 1.0
@@ -1433,12 +1478,12 @@ class DitherApp(QMainWindow):
             print(f"display_image: Could not convert PIL image to array: {e}")
             self.image_viewer.set_image(None)
             return
-        # Only handle NumPy arrays from here
-        if isinstance(image, np.ndarray):
-            self.image_viewer.update_frame(image)
-        else:
-            print("display_image: Unsupported image type for display.")
-            self.image_viewer.set_image(None)
+            # Only handle NumPy arrays from here
+            if isinstance(image, np.ndarray):
+                self.image_viewer.update_frame(image)
+            else:
+                print("display_image: Unsupported image type for display.")
+                self.image_viewer.set_image(None)
     
     def threshold_changed(self, value):
         self.threshold_label.setText(f"Threshold: {value}")
@@ -1483,7 +1528,7 @@ class DitherApp(QMainWindow):
             self.toggle_button.setEnabled(True)
             self.display_image(self.original_image)
             return
-            
+        
         alg = self.algorithm_combo.currentText()
         thr = self.threshold_slider.value()
         contrast_factor = self.contrast_slider.value() / 100.0
