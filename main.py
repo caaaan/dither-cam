@@ -37,6 +37,123 @@ except ImportError:
     PICAMERA_AVAILABLE = False
     print("Warning: picamera module not available. Camera features will be disabled.")
 
+class ImageViewer(QScrollArea):
+    """Custom image viewer widget with zoom functionality"""
+    
+    # Signal to notify when zoom factor changes
+    zoom_changed = pyqtSignal(float)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # Initialize main widget and layout
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setMinimumSize(1, 1)
+        
+        # Set the label as the widget for the scroll area
+        self.setWidget(self.image_label)
+        self.setWidgetResizable(True)
+        
+        # Initialize variables
+        self.pixmap = None
+        self.current_image = None
+        self.zoom_factor = 1.0
+        self.min_zoom = 0.1
+        self.max_zoom = 5.0
+        
+        # Setup scrollbar policy
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        # Setup appearance
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        
+    def set_image(self, image):
+        """Set a new image to display (accepts NumPy arrays or QImage)"""
+        if image is None:
+            self.image_label.clear()
+            self.pixmap = None
+            self.current_image = None
+            return
+        
+        # Convert image to QImage if it's a NumPy array
+        if isinstance(image, np.ndarray):
+            height, width = image.shape[:2]
+            
+            # Convert based on image type (grayscale or RGB)
+            if len(image.shape) == 2 or (len(image.shape) == 3 and image.shape[2] == 1):
+                # Grayscale image
+                qimage = QImage(image.data, width, height, width, QImage.Format.Format_Grayscale8)
+            else:
+                # RGB image - assume image is already in RGB format (not BGR)
+                bytes_per_line = width * 3
+                qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+        elif isinstance(image, QImage):
+            qimage = image
+        else:
+            # Unsupported image type
+            print(f"Unsupported image type: {type(image)}")
+            return
+        
+        # Create pixmap from QImage
+        self.pixmap = QPixmap.fromImage(qimage)
+        self.current_image = image
+        
+        # Apply current zoom factor
+        self.update_view()
+        
+    def update_view(self):
+        """Update the view with current zoom factor"""
+        if self.pixmap is None:
+            return
+            
+        # Calculate scaled size
+        scaled_size = self.pixmap.size() * self.zoom_factor
+        
+        # Create scaled pixmap and set it to the label
+        scaled_pixmap = self.pixmap.scaled(
+            scaled_size, 
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        
+        # Set the scaled pixmap to the label
+        self.image_label.setPixmap(scaled_pixmap)
+        
+        # Resize the label to fit the scaled image
+        self.image_label.resize(scaled_pixmap.size())
+        
+    def wheelEvent(self, event: QWheelEvent):
+        """Handle mouse wheel events for zooming"""
+        if self.pixmap is None:
+            # No image to zoom
+            return
+            
+        # Get the amount of scrolling
+        delta = event.angleDelta().y()
+        
+        # Calculate new zoom factor - faster zooming with larger steps
+        zoom_speed = 0.002 if self.zoom_factor < 1.0 else 0.005
+        new_zoom = self.zoom_factor + (delta * zoom_speed)
+        
+        # Enforce zoom limits
+        new_zoom = max(self.min_zoom, min(self.max_zoom, new_zoom))
+        
+        # Only update if zoom factor actually changed
+        if new_zoom != self.zoom_factor:
+            self.zoom_factor = new_zoom
+            self.update_view()
+            
+            # Emit signal about zoom change
+            self.zoom_changed.emit(self.zoom_factor)
+            
+    def set_zoom(self, zoom_factor):
+        """Set zoom factor directly"""
+        if zoom_factor != self.zoom_factor:
+            self.zoom_factor = max(self.min_zoom, min(self.max_zoom, zoom_factor))
+            self.update_view()
+
 def bgr_to_rgb_array(array):
     """Convert BGR array to RGB using simple NumPy slice operation"""
     if array is None or len(array.shape) < 3 or array.shape[2] < 3:
@@ -573,6 +690,17 @@ class CameraCaptureThread(QThread):
         else:
             print("Camera device cleanup skipped (disabled in config)")
 
+    def stop(self):
+        """Stop the camera capture thread safely"""
+        print("CameraCaptureThread stopping...")
+        self.is_running = False
+        
+        # Clean up camera resources
+        self.stop_camera()
+        
+        # For clean thread termination
+        self.wait(1000)  # Wait up to 1 second for thread to finish
+
 class DitherApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -992,6 +1120,280 @@ class DitherApp(QMainWindow):
         
         # Connect ImageViewer zoom changes to update slider/label
         self.image_viewer.zoom_changed.connect(self.update_controls_from_zoom_factor)
+
+    def handle_zoom_slider_change(self, value):
+        """Handle zoom slider changes by updating the image viewer zoom"""
+        zoom_factor = value / 100.0  # Convert percentage to factor
+        self.zoom_label.setText(f"Zoom: {value}%")
+        
+        # Update image viewer zoom (without triggering feedback loop)
+        self.image_viewer.set_zoom(zoom_factor)
+    
+    def update_controls_from_zoom_factor(self, zoom_factor):
+        """Update zoom controls when zoom changes from image viewer"""
+        zoom_percent = int(zoom_factor * 100)
+        
+        # Update slider without triggering valueChanged signal again
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(zoom_percent)
+        self.zoom_slider.blockSignals(False)
+        
+        # Update label
+        self.zoom_label.setText(f"Zoom: {zoom_percent}%")
+        
+    def toggle_image_display(self):
+        """Toggle between showing original and dithered image"""
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_OUTPUT
+        
+        if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_OUTPUT is None:
+            return  # No images to toggle between
+            
+        self.showing_original = not self.showing_original
+        
+        if self.showing_original:
+            self.toggle_button.setText("Switch to Dithered Image")
+            self.image_viewer.set_image(FRAME_BUFFER_ORIGINAL)
+        else:
+            self.toggle_button.setText("Switch to Original Image")
+            self.image_viewer.set_image(FRAME_BUFFER_OUTPUT)
+            
+    def update_camera_frame(self, frame_array):
+        """Update the image display with camera frame"""
+        if not self.camera_mode_active:
+            return  # Ignore frames if camera is no longer active
+            
+        # Set the frame to the image viewer
+        self.image_viewer.set_image(frame_array)
+        
+        # Enable toggle button if we have both original and output frames
+        global FRAME_BUFFER_ORIGINAL, FRAME_BUFFER_OUTPUT
+        if FRAME_BUFFER_ORIGINAL is not None and FRAME_BUFFER_OUTPUT is not None:
+            self.toggle_button.setEnabled(True)
+            
+        # Check if capture was requested
+        if self.capture_frame_requested:
+            self.capture_frame_requested = False
+            self.save_image()  # Save the current frame
+            
+    def capture_frame(self):
+        """Flag to capture and save the next frame"""
+        self.capture_frame_requested = True
+        
+    def algorithm_changed(self, index):
+        """Handle algorithm change and reapply if auto-render is checked"""
+        if self.auto_render.isChecked():
+            self.apply_dither()
+            
+    def threshold_changed(self, value):
+        """Update threshold label and reapply if auto-render is checked"""
+        self.threshold_label.setText(f"Threshold: {value}")
+        if self.auto_render.isChecked():
+            self.apply_dither()
+            
+    def contrast_changed(self, value):
+        """Update contrast label and reapply if auto-render is checked"""
+        contrast = value / 100.0
+        self.contrast_label.setText(f"Contrast: {contrast:.1f}")
+        if self.auto_render.isChecked():
+            self.apply_dither()
+            
+    def scale_changed(self, value):
+        """Update scale label and reapply if auto-render is checked"""
+        self.scale_label.setText(f"Pixel Scale: {value}")
+        if self.auto_render.isChecked():
+            self.apply_dither()
+            
+        # If we're in camera mode, try to reconfigure camera resolution
+        if self.camera_mode_active and self.capture_thread:
+            try:
+                self.capture_thread.reconfigure_resolution(value)
+            except Exception as e:
+                print(f"Error adjusting camera resolution: {e}")
+                
+    def rgb_changed(self, state):
+        """Handle toggling between RGB and grayscale mode"""
+        if self.auto_render.isChecked():
+            self.apply_dither()
+            
+    def pass_through_changed(self, state):
+        """Handle toggling pass-through mode"""
+        algorithm_enabled = not self.pass_through_mode.isChecked()
+        
+        # Enable or disable algorithm controls
+        self.algorithm_combo.setEnabled(algorithm_enabled)
+        self.threshold_slider.setEnabled(algorithm_enabled)
+        self.rgb_mode.setEnabled(algorithm_enabled)
+        
+        if self.auto_render.isChecked():
+            self.apply_dither()
+            
+    def open_image(self):
+        """Open an image file through file dialog"""
+        options = QFileDialog.Option.ReadOnly
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Image", "", 
+            "Image Files (*.png *.jpg *.jpeg *.bmp);;All Files (*)", 
+            options=options
+        )
+        
+        if file_path:
+            try:
+                # Use OpenCV to read image if available
+                try:
+                    import cv2
+                    img = cv2.imread(file_path)
+                    if img is None:
+                        raise ImportError("Failed to read with OpenCV")
+                    # Convert BGR to RGB
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                except ImportError:
+                    # Fall back to PIL
+                    from PIL import Image
+                    img = np.array(Image.open(file_path).convert("RGB"))
+                
+                # Update global buffer
+                global FRAME_BUFFER_ORIGINAL
+                FRAME_BUFFER_ORIGINAL = img
+                
+                # Display the loaded image
+                self.image_viewer.set_image(img)
+                self.showing_original = True
+                self.toggle_button.setText("Switch to Dithered Image")
+                self.toggle_button.setEnabled(False)  # Disable until dithered version exists
+                
+                # Enable buttons
+                self.save_button.setEnabled(True)
+                self.apply_button.setEnabled(True)
+                
+                # Apply dither if auto-render is checked
+                if self.auto_render.isChecked():
+                    self.apply_dither()
+            except Exception as e:
+                print(f"Error opening image: {e}")
+                import traceback
+                traceback.print_exc()
+                
+    def apply_dither(self):
+        """Apply dithering to the current image"""
+        global FRAME_BUFFER_ORIGINAL
+        global FRAME_BUFFER_OUTPUT
+        
+        if FRAME_BUFFER_ORIGINAL is None:
+            return  # No image to process
+            
+        try:
+            # Get current settings
+            alg = self.algorithm_combo.currentText()
+            thr = self.threshold_slider.value()
+            contrast_factor = self.contrast_slider.value() / 100.0
+            pixel_s = self.scale_slider.value()
+            
+            # Check if we're in pass-through mode
+            if self.pass_through_mode.isChecked():
+                # Just copy the original to output
+                if FRAME_BUFFER_OUTPUT is None or FRAME_BUFFER_OUTPUT.shape != FRAME_BUFFER_ORIGINAL.shape:
+                    FRAME_BUFFER_OUTPUT = np.empty_like(FRAME_BUFFER_ORIGINAL)
+                np.copyto(FRAME_BUFFER_OUTPUT, FRAME_BUFFER_ORIGINAL)
+            else:
+                # Create a copy of the original for processing
+                work_copy = FRAME_BUFFER_ORIGINAL.copy()
+                
+                # Apply contrast adjustment if needed
+                if abs(contrast_factor - 1.0) > 0.01:
+                    work_copy = work_copy.astype(np.float32)
+                    work_copy = 128 + contrast_factor * (work_copy - 128)
+                    work_copy = np.clip(work_copy, 0, 255).astype(np.uint8)
+                
+                # Apply dithering based on mode
+                if self.rgb_mode.isChecked():
+                    # Process for RGB mode
+                    if alg == "Floyd-Steinberg":
+                        if pixel_s == 1:
+                            result = fs_dither(work_copy.astype(np.float32), 'RGB', thr)
+                        else:
+                            result = downscale_dither_upscale(work_copy, thr, pixel_s, 'RGB')
+                    else:  # Simple Threshold
+                        if pixel_s == 1:
+                            result = simple_threshold_rgb_ps1(work_copy, thr)
+                        else:
+                            orig_h, orig_w = work_copy.shape[:2]
+                            result = simple_threshold_dither(work_copy, 'RGB', pixel_s, orig_w, orig_h, thr)
+                else:
+                    # Process for Grayscale
+                    # Convert to grayscale first
+                    gray = np.dot(work_copy[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                    
+                    if alg == "Floyd-Steinberg":
+                        if pixel_s == 1:
+                            result = fs_dither(gray.astype(np.float32), 'L', thr)
+                        else:
+                            result = downscale_dither_upscale(gray, thr, pixel_s, 'L')
+                    else:  # Simple Threshold
+                        if pixel_s == 1:
+                            result = np.where(gray < thr, 0, 255).astype(np.uint8)
+                        else:
+                            orig_h, orig_w = gray.shape
+                            result = simple_threshold_dither(gray, 'L', pixel_s, orig_w, orig_h, thr)
+                
+                # Update output buffer
+                FRAME_BUFFER_OUTPUT = result
+            
+            # Update display if not showing original
+            if not self.showing_original:
+                self.image_viewer.set_image(FRAME_BUFFER_OUTPUT)
+            
+            # Enable toggle button now that we have both images
+            self.toggle_button.setEnabled(True)
+            
+            # Enable save button
+            self.save_button.setEnabled(True)
+            
+        except Exception as e:
+            print(f"Error applying dither: {e}")
+            import traceback
+            traceback.print_exc()
+            
+    def save_image(self):
+        """Save the current image (original or dithered)"""
+        if self.showing_original and FRAME_BUFFER_ORIGINAL is None:
+            return
+        if not self.showing_original and FRAME_BUFFER_OUTPUT is None:
+            return
+            
+        options = QFileDialog.Option.ReadOnly
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Image", "", 
+            "PNG Files (*.png);;JPEG Files (*.jpg);;All Files (*)", 
+            options=options
+        )
+        
+        if file_path:
+            try:
+                # Determine which image to save
+                img_to_save = FRAME_BUFFER_ORIGINAL if self.showing_original else FRAME_BUFFER_OUTPUT
+                
+                # Use OpenCV to save if available
+                try:
+                    import cv2
+                    # Convert from RGB to BGR for OpenCV
+                    img_to_save_bgr = img_to_save.copy()
+                    if len(img_to_save.shape) == 3 and img_to_save.shape[2] == 3:
+                        img_to_save_bgr = img_to_save_bgr[:, :, ::-1]
+                    cv2.imwrite(file_path, img_to_save_bgr)
+                except ImportError:
+                    # Fall back to PIL
+                    from PIL import Image
+                    if len(img_to_save.shape) == 2:  # Grayscale
+                        Image.fromarray(img_to_save).save(file_path)
+                    else:  # RGB
+                        Image.fromarray(img_to_save).save(file_path)
+                        
+                print(f"Image saved to {file_path}")
+            except Exception as e:
+                print(f"Error saving image: {e}")
+                import traceback
+                traceback.print_exc()
 
 def main():
     """Main application entry point with initialization of global frame buffers"""
