@@ -761,8 +761,8 @@ class ImageViewer(QScrollArea):
         self.image_label.setStyleSheet("background-color: transparent; border: 1px solid #ddd;")
         
         self.setWidget(self.image_label)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(QScrollArea.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(QScrollArea.ScrollBarPolicy.ScrollBarAsNeeded)
         
         self.original_pixmap = None
         self.zoom_factor = 1.0
