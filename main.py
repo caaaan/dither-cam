@@ -1818,6 +1818,9 @@ class DitherApp(QMainWindow):
 
 def main():
     """Main application entry point with initialization of global frame buffers"""
+    # Make sure time module is accessible throughout
+    import time as time_module
+    
     # Initialize global frame handling variables
     global FRAME_BUFFER_ORIGINAL
     global FRAME_BUFFER_PROCESSING
@@ -1833,24 +1836,23 @@ def main():
     FRAME_BUFFER_OUTPUT = None
     FRAME_BUFFER_GRAYSCALE = None
     SHARED_ALGORITHM_BUFFER = None
-    LAST_FRAME_TIME = time.time()
+    LAST_FRAME_TIME = time_module.time()
     FRAME_COUNT = 0
     
     # Try to ensure clean camera state at application startup
     try:
         import os
         import subprocess
-        import time
         
         print("Performing thorough camera system cleanup at startup...")
         
         # First kill any existing camera processes
         os.system("sudo pkill -f libcamera")
-        time.sleep(2.0)
+        time_module.sleep(2.0)
         
         # Also kill any Python processes that might be using the camera
         os.system("sudo pkill -f python.*picamera")
-        time.sleep(1.0)
+        time_module.sleep(1.0)
         
         # Run a quick camera capture to reset the system
         try:
@@ -1860,11 +1862,11 @@ def main():
             print("libcamera-still command timed out, this is normal")
             
         # Give system time to release resources
-        time.sleep(2.0)
+        time_module.sleep(2.0)
         
         # Force the libcamera system service to restart
         os.system("sudo systemctl restart libcamera.service 2>/dev/null || true")
-        time.sleep(2.0)
+        time_module.sleep(2.0)
         
         # Force garbage collection
         import gc
