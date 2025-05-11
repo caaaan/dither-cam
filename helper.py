@@ -634,10 +634,35 @@ def get_bayer_matrix(size):
         return np.array([[0, 2], 
                          [3, 1]], dtype=np.uint8)
     else:
-        # Recursively build larger matrices
-        m = get_bayer_matrix(size // 2)
-        return np.block([[4*m, 4*m+2], 
-                          [4*m+3, 4*m+1]])
+        # Recursively build larger matrices without using np.block
+        smaller = get_bayer_matrix(size // 2)
+        smaller_h, smaller_w = smaller.shape
+        
+        # Create the larger matrix
+        result = np.zeros((size, size), dtype=np.uint8)
+        
+        # Fill in the quadrants
+        # Top-left: 4*smaller
+        for y in range(smaller_h):
+            for x in range(smaller_w):
+                result[y, x] = 4 * smaller[y, x]
+        
+        # Top-right: 4*smaller + 2
+        for y in range(smaller_h):
+            for x in range(smaller_w):
+                result[y, x + smaller_w] = 4 * smaller[y, x] + 2
+        
+        # Bottom-left: 4*smaller + 3
+        for y in range(smaller_h):
+            for x in range(smaller_w):
+                result[y + smaller_h, x] = 4 * smaller[y, x] + 3
+        
+        # Bottom-right: 4*smaller + 1
+        for y in range(smaller_h):
+            for x in range(smaller_w):
+                result[y + smaller_h, x + smaller_w] = 4 * smaller[y, x] + 1
+        
+        return result
 
 @njit
 def bayer_dither_rgb(img_array, threshold=128, matrix_size=8):
