@@ -13,7 +13,7 @@ import os, config
 from helper import (fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither, 
                    block_average_rgb, block_average_gray, nearest_upscale_rgb, 
                    nearest_upscale_gray, downscale_dither_upscale, bgr_to_rgb, 
-                   optimized_pass_through)
+                   optimized_pass_through, bayer_dither)
 
 # Global frame handling variables
 # These are used across the application to manage frame flow
@@ -633,6 +633,40 @@ class CameraCaptureThread(QThread):
                 if alg == "Floyd-Steinberg":
                     # Apply dithering directly with type optimization
                     result = fs_dither(array_to_dither.astype(np.float32), mode, thr)
+                elif alg == "Bayer":
+                    # For Bayer, first downscale, then apply bayer dithering, then upscale
+                    # Step 1: Downscale
+                    small_h = max(1, orig_h // pixel_s)
+                    small_w = max(1, orig_w // pixel_s)
+                    
+                    if mode == 'RGB':
+                        # Ensure the shared downscaled buffer has the right dimensions
+                        if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
+                            DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
+                        
+                        # RGB block averaging using the shared buffer
+                        small_arr = block_average_rgb(array_to_dither, DOWNSCALED_BUFFER_RGB, small_h, small_w, pixel_s)
+                        
+                        # Step 2: Apply Bayer dithering to downscaled image
+                        small_result = bayer_dither(small_arr, mode, thr)
+                        
+                        # Step 3: Upscale back to original size
+                        upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
+                        result = nearest_upscale_rgb(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                    else:
+                        # Ensure the shared downscaled buffer has the right dimensions
+                        if DOWNSCALED_BUFFER_GRAY is None or DOWNSCALED_BUFFER_GRAY.shape != (small_h, small_w):
+                            DOWNSCALED_BUFFER_GRAY = np.empty((small_h, small_w), dtype=np.float32)
+                        
+                        # Grayscale block averaging using the shared buffer
+                        small_arr = block_average_gray(array_to_dither, DOWNSCALED_BUFFER_GRAY, small_h, small_w, pixel_s)
+                        
+                        # Apply Bayer dithering to downscaled image
+                        small_result = bayer_dither(small_arr, mode, thr)
+                        
+                        # Upscale back to original size
+                        upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
+                        result = nearest_upscale_gray(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                 elif alg == "Simple Threshold":
                     # Apply simple threshold directly with minimal allocations
                     if mode == 'RGB':
@@ -646,14 +680,12 @@ class CameraCaptureThread(QThread):
                 if alg == "Floyd-Steinberg":
                     # The downscale_dither_upscale function already handles the complete pipeline
                     result = downscale_dither_upscale(array_to_dither, thr, pixel_s, mode)
-                elif alg == "Simple Threshold":
-                    # Perform manual downscale/upscale for simple threshold
-                    
-                    # First create a downscaled version
+                elif alg == "Bayer":
+                    # For Bayer, first downscale, then apply bayer dithering, then upscale
+                    # Step 1: Downscale
                     small_h = max(1, orig_h // pixel_s)
                     small_w = max(1, orig_w // pixel_s)
                     
-                    # Downscale using block averaging (simplified)
                     if mode == 'RGB':
                         # Ensure the shared downscaled buffer has the right dimensions
                         if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
@@ -662,10 +694,10 @@ class CameraCaptureThread(QThread):
                         # RGB block averaging using the shared buffer
                         small_arr = block_average_rgb(array_to_dither, DOWNSCALED_BUFFER_RGB, small_h, small_w, pixel_s)
                         
-                        # Apply threshold to downscaled image
-                        small_result = simple_threshold_rgb_ps1(small_arr, thr)
+                        # Step 2: Apply Bayer dithering to downscaled image
+                        small_result = bayer_dither(small_arr, mode, thr)
                         
-                        # Upscale back to original size
+                        # Step 3: Upscale back to original size
                         upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
                         result = nearest_upscale_rgb(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                     else:
@@ -676,39 +708,20 @@ class CameraCaptureThread(QThread):
                         # Grayscale block averaging using the shared buffer
                         small_arr = block_average_gray(array_to_dither, DOWNSCALED_BUFFER_GRAY, small_h, small_w, pixel_s)
                         
-                        # Apply threshold to downscaled image
-                        small_result = np.where(small_arr < thr, 0, 255).astype(np.uint8)
+                        # Apply Bayer dithering to downscaled image
+                        small_result = bayer_dither(small_arr, mode, thr)
                         
                         # Upscale back to original size
                         upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
                         result = nearest_upscale_gray(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
-                else:
-                    # Fallback with manual downscale/upscale
-                    small_h = max(1, orig_h // pixel_s)
-                    small_w = max(1, orig_w // pixel_s)
-                    
+                elif alg == "Simple Threshold":
+                    # Apply simple threshold directly with minimal allocations
                     if mode == 'RGB':
-                        # Ensure the shared downscaled buffer has the right dimensions
-                        if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
-                            DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
-                        
-                        # RGB downscale using the shared buffer
-                        small_arr = block_average_rgb(array_to_dither, DOWNSCALED_BUFFER_RGB, small_h, small_w, pixel_s)
-                        
-                        # Upscale
-                        upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
-                        result = nearest_upscale_rgb(small_arr, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                        result = simple_threshold_rgb_ps1(array_to_dither, thr)
                     else:
-                        # Ensure the shared downscaled buffer has the right dimensions
-                        if DOWNSCALED_BUFFER_GRAY is None or DOWNSCALED_BUFFER_GRAY.shape != (small_h, small_w):
-                            DOWNSCALED_BUFFER_GRAY = np.empty((small_h, small_w), dtype=np.float32)
-                            
-                        # Grayscale downscale using the shared buffer
-                        small_arr = block_average_gray(array_to_dither, DOWNSCALED_BUFFER_GRAY, small_h, small_w, pixel_s)
-                        
-                        # Upscale
-                        upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
-                        result = nearest_upscale_gray(small_arr, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                        result = np.where(array_to_dither < thr, 0, 255).astype(np.uint8)
+                else:
+                    result = array_to_dither  # Fallback
             
             # Ensure the result has the same shape as the original
             if mode == 'RGB' and result.shape != orig_shape:
@@ -1125,7 +1138,7 @@ class DitherApp(QMainWindow):
         self.control_layout.addWidget(self.algorithm_label)
         
         self.algorithm_combo = QComboBox()
-        self.algorithm_combo.addItems(["Floyd-Steinberg", "Simple Threshold"])
+        self.algorithm_combo.addItems(["Floyd-Steinberg", "Bayer", "Simple Threshold"])
         self.algorithm_combo.currentIndexChanged.connect(self.algorithm_changed)
         self.algorithm_combo.setMinimumWidth(180)
         self.control_layout.addWidget(self.algorithm_combo, 0, Qt.AlignmentFlag.AlignCenter)
@@ -1496,6 +1509,8 @@ class DitherApp(QMainWindow):
                         # Process for RGB mode
                         if alg == "Floyd-Steinberg":
                             result = fs_dither(work_copy.astype(np.float32), 'RGB', thr)
+                        elif alg == "Bayer":
+                            result = bayer_dither(work_copy, 'RGB', thr)
                         else:  # Simple Threshold
                             result = simple_threshold_rgb_ps1(work_copy, thr)
                     else:
@@ -1505,6 +1520,8 @@ class DitherApp(QMainWindow):
                         
                         if alg == "Floyd-Steinberg":
                             result = fs_dither(gray.astype(np.float32), 'L', thr)
+                        elif alg == "Bayer":
+                            result = bayer_dither(gray, 'L', thr)
                         else:  # Simple Threshold
                             result = np.where(gray < thr, 0, 255).astype(np.uint8)
                 else:
@@ -1514,39 +1531,55 @@ class DitherApp(QMainWindow):
                         if alg == "Floyd-Steinberg":
                             # This function already handles the complete pipeline
                             result = downscale_dither_upscale(work_copy, thr, pixel_s, 'RGB')
-                        else:  # Simple Threshold
-                            # Manual downscale and upscale
-                            # First determine size of downscaled image
+                        elif alg == "Bayer":
+                            # For Bayer, first downscale, then apply bayer dithering, then upscale
+                            # Step 1: Downscale
                             small_h = max(1, orig_h // pixel_s)
                             small_w = max(1, orig_w // pixel_s)
                             
-                            # Ensure the shared downscaled buffer has the right dimensions
-                            if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
-                                DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
-                            
-                            # RGB block averaging using the shared buffer
-                            small_arr = block_average_rgb(work_copy, DOWNSCALED_BUFFER_RGB, small_h, small_w, pixel_s)
-                            
-                            # Apply threshold to downscaled image
-                            small_result = simple_threshold_rgb_ps1(small_arr, thr)
-                            
-                            # Upscale back to original size
-                            upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
-                            result = nearest_upscale_rgb(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                            if mode == 'RGB':
+                                # Ensure the shared downscaled buffer has the right dimensions
+                                if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
+                                    DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
+                                
+                                # RGB block averaging using the shared buffer
+                                small_arr = block_average_rgb(work_copy, DOWNSCALED_BUFFER_RGB, small_h, small_w, pixel_s)
+                                
+                                # Step 2: Apply Bayer dithering to downscaled image
+                                small_result = bayer_dither(small_arr, 'RGB', thr)
+                                
+                                # Step 3: Upscale back to original size
+                                upscaled = np.empty((work_copy.shape[0], work_copy.shape[1], 3), dtype=np.uint8)
+                                result = nearest_upscale_rgb(small_result, upscaled, work_copy.shape[0], work_copy.shape[1], small_h, small_w, pixel_s)
+                            else:
+                                # Ensure the shared downscaled buffer has the right dimensions
+                                if DOWNSCALED_BUFFER_GRAY is None or DOWNSCALED_BUFFER_GRAY.shape != (small_h, small_w):
+                                    DOWNSCALED_BUFFER_GRAY = np.empty((small_h, small_w), dtype=np.float32)
+                                
+                                # Grayscale block averaging using the shared buffer
+                                small_arr = block_average_gray(work_copy, DOWNSCALED_BUFFER_GRAY, small_h, small_w, pixel_s)
+                                
+                                # Apply Bayer dithering to downscaled image
+                                small_result = bayer_dither(small_arr, 'L', thr)
+                                
+                                # Upscale back to original size
+                                upscaled = np.empty((work_copy.shape[0], work_copy.shape[1]), dtype=np.uint8)
+                                result = nearest_upscale_gray(small_result, upscaled, work_copy.shape[0], work_copy.shape[1], small_h, small_w, pixel_s)
+                        else:  # Simple Threshold
+                            result = simple_threshold_rgb_ps1(work_copy, thr)
                     else:
                         # Grayscale mode
                         # Convert to grayscale first
                         gray = np.dot(work_copy[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
-                        orig_h, orig_w = gray.shape
                         
                         if alg == "Floyd-Steinberg":
                             # This function already handles the complete pipeline
                             result = downscale_dither_upscale(gray, thr, pixel_s, 'L')
-                        else:  # Simple Threshold
-                            # Manual downscale and upscale
-                            # First determine size of downscaled image
-                            small_h = max(1, orig_h // pixel_s)
-                            small_w = max(1, orig_w // pixel_s)
+                        elif alg == "Bayer":
+                            # For Bayer, first downscale, then apply bayer dithering, then upscale
+                            # Step 1: Downscale
+                            small_h = max(1, gray.shape[0] // pixel_s)
+                            small_w = max(1, gray.shape[1] // pixel_s)
                             
                             # Ensure the shared downscaled buffer has the right dimensions
                             if DOWNSCALED_BUFFER_GRAY is None or DOWNSCALED_BUFFER_GRAY.shape != (small_h, small_w):
@@ -1555,12 +1588,14 @@ class DitherApp(QMainWindow):
                             # Grayscale block averaging using the shared buffer
                             small_arr = block_average_gray(gray, DOWNSCALED_BUFFER_GRAY, small_h, small_w, pixel_s)
                             
-                            # Apply threshold to downscaled image
-                            small_result = np.where(small_arr < thr, 0, 255).astype(np.uint8)
+                            # Apply Bayer dithering to downscaled image
+                            small_result = bayer_dither(small_arr, 'L', thr)
                             
                             # Upscale back to original size
-                            upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
-                            result = nearest_upscale_gray(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
+                            upscaled = np.empty((gray.shape[0], gray.shape[1]), dtype=np.uint8)
+                            result = nearest_upscale_gray(small_result, upscaled, gray.shape[0], gray.shape[1], small_h, small_w, pixel_s)
+                        else:  # Simple Threshold
+                            result = np.where(gray < thr, 0, 255).astype(np.uint8)
                 
                 # Ensure the result has the same shape as the original
                 if self.rgb_mode.isChecked() and result.shape != orig_shape:

@@ -624,3 +624,82 @@ def optimized_pass_through(array, out_buffer=None):
     else:
         # Just make a clean copy if no buffer available
         return array.copy()
+
+# Bayer Matrix dithering implementation
+@njit
+def get_bayer_matrix(size):
+    """Generate a Bayer matrix of given size (must be power of 2)"""
+    if size == 2:
+        # Base 2x2 Bayer matrix
+        return np.array([[0, 2], 
+                         [3, 1]], dtype=np.uint8)
+    else:
+        # Recursively build larger matrices
+        m = get_bayer_matrix(size // 2)
+        return np.block([[4*m, 4*m+2], 
+                          [4*m+3, 4*m+1]])
+
+@njit
+def bayer_dither_rgb(img_array, threshold=128, matrix_size=8):
+    """Apply Bayer dithering to RGB images"""
+    h, w, c = img_array.shape
+    
+    # Generate or get the Bayer matrix
+    bayer_matrix = get_bayer_matrix(matrix_size)
+    matrix_h, matrix_w = bayer_matrix.shape
+    
+    # Normalize the matrix to range 0-255
+    normalized_matrix = (bayer_matrix * 255) // (matrix_size * matrix_size)
+    
+    # Apply dithering
+    for y in range(h):
+        for x in range(w):
+            # Get matrix value for this pixel
+            matrix_val = normalized_matrix[y % matrix_h, x % matrix_w]
+            
+            # Apply to each channel
+            for ch in range(3):
+                pixel_val = img_array[y, x, ch]
+                # Adjust threshold by matrix value - creates the dithering pattern
+                # Values higher than matrix offset stay white, others become black
+                img_array[y, x, ch] = 0 if pixel_val < (threshold + matrix_val - 128) else 255
+    
+    return img_array
+
+@njit
+def bayer_dither_greyscale(img_array, threshold=128, matrix_size=8):
+    """Apply Bayer dithering to grayscale images"""
+    h, w = img_array.shape
+    
+    # Generate or get the Bayer matrix
+    bayer_matrix = get_bayer_matrix(matrix_size)
+    matrix_h, matrix_w = bayer_matrix.shape
+    
+    # Normalize the matrix to range 0-255
+    normalized_matrix = (bayer_matrix * 255) // (matrix_size * matrix_size)
+    
+    # Apply dithering
+    for y in range(h):
+        for x in range(w):
+            # Get matrix value for this pixel
+            matrix_val = normalized_matrix[y % matrix_h, x % matrix_w]
+            
+            # Apply to pixel
+            pixel_val = img_array[y, x]
+            img_array[y, x] = 0 if pixel_val < (threshold + matrix_val - 128) else 255
+    
+    return img_array
+
+def bayer_dither(arr, type, threshold=128):
+    """Apply Bayer dithering to an array"""
+    # Make a copy of the input array to avoid modifying the original
+    work_arr = arr.copy()
+    matrix_size = 8  # 8x8 Bayer matrix (can be adjusted)
+    
+    if type == 'RGB':
+        result = bayer_dither_rgb(work_arr, threshold, matrix_size)
+    else:  # type == 'L'
+        result = bayer_dither_greyscale(work_arr, threshold, matrix_size)
+        
+    # Ensure final result is uint8
+    return np.clip(result, 0, 255).astype(np.uint8)
