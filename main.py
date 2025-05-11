@@ -1325,7 +1325,7 @@ class DitherApp(QMainWindow):
             file_ext = file_ext[1:]
             
         # Generate filename with current date and time
-        timestamp = datetime.now().strftime("%Y/%m/%d_%H:%M:%S")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         filename = f"capture_{timestamp}.{file_ext}"
         file_path = os.path.join(public_folder, filename)
         
