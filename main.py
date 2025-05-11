@@ -1685,6 +1685,77 @@ def main():
     LAST_FRAME_TIME = time_module.time()
     FRAME_COUNT = 0
     
+    # Warm-up initialization for helper functions using ditherer.jpeg
+    print("Initializing and warming up processing functions...")
+    try:
+        # Load ditherer.jpeg
+        import os
+        import cv2
+        ditherer_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ditherer.jpeg")
+        if os.path.exists(ditherer_path):
+            # Load the image
+            test_img = cv2.imread(ditherer_path)
+            if test_img is not None:
+                # Convert BGR to RGB
+                test_img = cv2.cvtColor(test_img, cv2.COLOR_BGR2RGB)
+                
+                # Copy to FRAME_BUFFER_ORIGINAL
+                FRAME_BUFFER_ORIGINAL = test_img.copy()
+                
+                # Create grayscale version
+                test_img_gray = np.dot(test_img[...,:3], [0.2989, 0.5870, 0.1140]).astype(np.uint8)
+                FRAME_BUFFER_GRAYSCALE = test_img_gray.copy()
+                
+                # Run RGB processing with different algorithms and pixel scales
+                print("Warming up RGB processing...")
+                fs_result = fs_dither(test_img.astype(np.float32), 'RGB', 128)
+                simple_result = simple_threshold_rgb_ps1(test_img, 128)
+                
+                # Run downscale/upscale for different pixel scales
+                for ps in [2, 4]:
+                    downscaled_result = downscale_dither_upscale(test_img, 128, ps, 'RGB')
+                    
+                    # Also use our block average and upscale functions directly
+                    small_h = max(1, test_img.shape[0] // ps)
+                    small_w = max(1, test_img.shape[1] // ps)
+                    
+                    if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
+                        DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
+                    
+                    small_arr = block_average_rgb(test_img, DOWNSCALED_BUFFER_RGB, small_h, small_w, ps)
+                    upscaled = np.empty((test_img.shape[0], test_img.shape[1], 3), dtype=np.uint8)
+                    nearest_upscale_rgb(small_arr, upscaled, test_img.shape[0], test_img.shape[1], small_h, small_w, ps)
+                
+                # Run grayscale processing
+                print("Warming up grayscale processing...")
+                fs_gray_result = fs_dither(test_img_gray.astype(np.float32), 'L', 128)
+                simple_gray_result = np.where(test_img_gray < 128, 0, 255).astype(np.uint8)
+                
+                # Run grayscale downscale/upscale
+                for ps in [2, 4]:
+                    gray_downscaled = downscale_dither_upscale(test_img_gray, 128, ps, 'L')
+                    
+                    # Also use block average and upscale directly
+                    small_h = max(1, test_img_gray.shape[0] // ps)
+                    small_w = max(1, test_img_gray.shape[1] // ps)
+                    
+                    if DOWNSCALED_BUFFER_GRAY is None or DOWNSCALED_BUFFER_GRAY.shape != (small_h, small_w):
+                        DOWNSCALED_BUFFER_GRAY = np.empty((small_h, small_w), dtype=np.float32)
+                    
+                    small_arr = block_average_gray(test_img_gray, DOWNSCALED_BUFFER_GRAY, small_h, small_w, ps)
+                    upscaled = np.empty((test_img_gray.shape[0], test_img_gray.shape[1]), dtype=np.uint8)
+                    nearest_upscale_gray(small_arr, upscaled, test_img_gray.shape[0], test_img_gray.shape[1], small_h, small_w, ps)
+                
+                print("Processing function initialization complete.")
+            else:
+                print("Could not load ditherer.jpeg for initialization")
+        else:
+            print("ditherer.jpeg not found for initialization")
+    except Exception as e:
+        print(f"Error during processing initialization (non-critical): {e}")
+        import traceback
+        traceback.print_exc()
+    
     # Only run camera cleanup if CAMERA_SAFE_INIT is enabled in config
     if config.CAMERA_SAFE_INIT:
         try:
