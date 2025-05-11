@@ -1276,7 +1276,8 @@ class DitherApp(QMainWindow):
             else:
                 self.freeze_frame = frame_array.copy()
                 
-            # Save the current captured frame as FRAME_BUFFER_ORIGINAL
+            # Update FRAME_BUFFER_ORIGINAL with the current camera frame
+            # This is always needed regardless of what we're displaying
             if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != frame_array.shape:
                 FRAME_BUFFER_ORIGINAL = np.empty_like(frame_array)
             np.copyto(FRAME_BUFFER_ORIGINAL, frame_array)
@@ -1307,7 +1308,10 @@ class DitherApp(QMainWindow):
     
     def auto_save_captured_image(self):
         """Auto-save captured frame to the public folder with timestamp filename"""
-        if FRAME_BUFFER_ORIGINAL is None:
+        # Use the appropriate frame buffer based on what's being displayed
+        frame_to_save = FRAME_BUFFER_OUTPUT if not self.showing_original and not self.pass_through_mode.isChecked() else FRAME_BUFFER_ORIGINAL
+        
+        if frame_to_save is None:
             print("No frame to save")
             return
             
@@ -1332,7 +1336,7 @@ class DitherApp(QMainWindow):
         try:
             # Save the image
             import cv2
-            cv2.imwrite(file_path, FRAME_BUFFER_ORIGINAL)
+            cv2.imwrite(file_path, frame_to_save)
             print(f"Image auto-saved to {file_path}")
         except Exception as e:
             print(f"Error auto-saving image: {e}")
