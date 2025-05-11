@@ -22,6 +22,8 @@ FRAME_BUFFER_PROCESSING = None   # Buffer used during processing steps
 FRAME_BUFFER_OUTPUT = None       # Final frame after processing (to display)
 FRAME_BUFFER_GRAYSCALE = None    # Grayscale version when needed
 SHARED_ALGORITHM_BUFFER = None   # Shared buffer for all algorithms - prevents memory allocation lag
+DOWNSCALED_BUFFER_RGB = None     # Shared buffer for downscaled RGB images
+DOWNSCALED_BUFFER_GRAY = None    # Shared buffer for downscaled grayscale images
 
 # Frame handling metrics
 LAST_FRAME_TIME = 0              # Time when last frame was processed
@@ -583,8 +585,10 @@ class CameraCaptureThread(QThread):
             contrast_factor = self.app.contrast_slider.value() / 100.0
             pixel_s = self.app.scale_slider.value()
             
-            # Access global processing buffer
+            # Access global processing buffers
             global FRAME_BUFFER_PROCESSING
+            global DOWNSCALED_BUFFER_RGB
+            global DOWNSCALED_BUFFER_GRAY
             
             # Fast path for very small images - avoid unnecessary buffer allocation
             is_small = array.size < 100000  # Reduced threshold for better performance
@@ -651,9 +655,12 @@ class CameraCaptureThread(QThread):
                     
                     # Downscale using block averaging (simplified)
                     if mode == 'RGB':
-                        # RGB block averaging
-                        small_arr = np.empty((small_h, small_w, 3), dtype=np.float32)
-                        small_arr = block_average_rgb(array_to_dither, small_arr, small_h, small_w, pixel_s)
+                        # Ensure the shared downscaled buffer has the right dimensions
+                        if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
+                            DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
+                        
+                        # RGB block averaging using the shared buffer
+                        small_arr = block_average_rgb(array_to_dither, DOWNSCALED_BUFFER_RGB, small_h, small_w, pixel_s)
                         
                         # Apply threshold to downscaled image
                         small_result = simple_threshold_rgb_ps1(small_arr, thr)
@@ -662,9 +669,12 @@ class CameraCaptureThread(QThread):
                         upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
                         result = nearest_upscale_rgb(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                     else:
-                        # Grayscale block averaging
-                        small_arr = np.empty((small_h, small_w), dtype=np.float32)
-                        small_arr = block_average_gray(array_to_dither, small_arr, small_h, small_w, pixel_s)
+                        # Ensure the shared downscaled buffer has the right dimensions
+                        if DOWNSCALED_BUFFER_GRAY is None or DOWNSCALED_BUFFER_GRAY.shape != (small_h, small_w):
+                            DOWNSCALED_BUFFER_GRAY = np.empty((small_h, small_w), dtype=np.float32)
+                        
+                        # Grayscale block averaging using the shared buffer
+                        small_arr = block_average_gray(array_to_dither, DOWNSCALED_BUFFER_GRAY, small_h, small_w, pixel_s)
                         
                         # Apply threshold to downscaled image
                         small_result = np.where(small_arr < thr, 0, 255).astype(np.uint8)
@@ -678,23 +688,31 @@ class CameraCaptureThread(QThread):
                     small_w = max(1, orig_w // pixel_s)
                     
                     if mode == 'RGB':
-                        # RGB downscale
-                        small_arr = np.empty((small_h, small_w, 3), dtype=np.float32)
-                        small_arr = block_average_rgb(array_to_dither, small_arr, small_h, small_w, pixel_s)
+                        # Ensure the shared downscaled buffer has the right dimensions
+                        if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
+                            DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
+                        
+                        # RGB downscale using the shared buffer
+                        small_arr = block_average_rgb(array_to_dither, DOWNSCALED_BUFFER_RGB, small_h, small_w, pixel_s)
+                        
                         # Upscale
                         upscaled = np.empty((orig_h, orig_w, 3), dtype=np.uint8)
                         result = nearest_upscale_rgb(small_arr, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                     else:
-                        # Grayscale downscale
-                        small_arr = np.empty((small_h, small_w), dtype=np.float32)
-                        small_arr = block_average_gray(array_to_dither, small_arr, small_h, small_w, pixel_s)
+                        # Ensure the shared downscaled buffer has the right dimensions
+                        if DOWNSCALED_BUFFER_GRAY is None or DOWNSCALED_BUFFER_GRAY.shape != (small_h, small_w):
+                            DOWNSCALED_BUFFER_GRAY = np.empty((small_h, small_w), dtype=np.float32)
+                            
+                        # Grayscale downscale using the shared buffer
+                        small_arr = block_average_gray(array_to_dither, DOWNSCALED_BUFFER_GRAY, small_h, small_w, pixel_s)
+                        
                         # Upscale
                         upscaled = np.empty((orig_h, orig_w), dtype=np.uint8)
                         result = nearest_upscale_gray(small_arr, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
             
             # Ensure the result has the same shape as the original
             if mode == 'RGB' and result.shape != orig_shape:
-                print(f"Warning: Camera frame result shape {result.shape} doesn't match original {orig_shape}")
+                print(f"Warning: Result shape {result.shape} doesn't match original {orig_shape}")
                 # Attempt to fix the shape
                 if len(result.shape) == 2 and len(orig_shape) == 3:
                     # Convert grayscale to RGB
@@ -702,7 +720,7 @@ class CameraCaptureThread(QThread):
                     for c in range(3):
                         rgb_result[:,:,c] = result
                     result = rgb_result
-                    
+                
             # Final dimension check to ensure proper output
             if result.shape != orig_shape and ((mode == 'RGB' and len(orig_shape) == 3) or 
                                               (mode == 'L' and len(orig_shape) == 2)):
@@ -792,6 +810,8 @@ class DitherApp(QMainWindow):
         global FRAME_BUFFER_OUTPUT
         global FRAME_BUFFER_GRAYSCALE
         global SHARED_ALGORITHM_BUFFER
+        global DOWNSCALED_BUFFER_RGB
+        global DOWNSCALED_BUFFER_GRAY
         global LAST_FRAME_TIME
         global FRAME_COUNT
         
@@ -1438,6 +1458,8 @@ class DitherApp(QMainWindow):
         """Apply dithering to the current image"""
         global FRAME_BUFFER_ORIGINAL
         global FRAME_BUFFER_OUTPUT
+        global DOWNSCALED_BUFFER_RGB
+        global DOWNSCALED_BUFFER_GRAY
         
         if FRAME_BUFFER_ORIGINAL is None:
             return  # No image to process
@@ -1498,9 +1520,12 @@ class DitherApp(QMainWindow):
                             small_h = max(1, orig_h // pixel_s)
                             small_w = max(1, orig_w // pixel_s)
                             
-                            # Perform block averaging for downscaling
-                            small_arr = np.empty((small_h, small_w, 3), dtype=np.float32)
-                            small_arr = block_average_rgb(work_copy, small_arr, small_h, small_w, pixel_s)
+                            # Ensure the shared downscaled buffer has the right dimensions
+                            if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
+                                DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
+                            
+                            # RGB block averaging using the shared buffer
+                            small_arr = block_average_rgb(work_copy, DOWNSCALED_BUFFER_RGB, small_h, small_w, pixel_s)
                             
                             # Apply threshold to downscaled image
                             small_result = simple_threshold_rgb_ps1(small_arr, thr)
@@ -1523,9 +1548,12 @@ class DitherApp(QMainWindow):
                             small_h = max(1, orig_h // pixel_s)
                             small_w = max(1, orig_w // pixel_s)
                             
-                            # Perform block averaging for downscaling
-                            small_arr = np.empty((small_h, small_w), dtype=np.float32)
-                            small_arr = block_average_gray(gray, small_arr, small_h, small_w, pixel_s)
+                            # Ensure the shared downscaled buffer has the right dimensions
+                            if DOWNSCALED_BUFFER_GRAY is None or DOWNSCALED_BUFFER_GRAY.shape != (small_h, small_w):
+                                DOWNSCALED_BUFFER_GRAY = np.empty((small_h, small_w), dtype=np.float32)
+                            
+                            # Grayscale block averaging using the shared buffer
+                            small_arr = block_average_gray(gray, DOWNSCALED_BUFFER_GRAY, small_h, small_w, pixel_s)
                             
                             # Apply threshold to downscaled image
                             small_result = np.where(small_arr < thr, 0, 255).astype(np.uint8)
@@ -1628,6 +1656,8 @@ def main():
     global FRAME_BUFFER_OUTPUT
     global FRAME_BUFFER_GRAYSCALE
     global SHARED_ALGORITHM_BUFFER
+    global DOWNSCALED_BUFFER_RGB
+    global DOWNSCALED_BUFFER_GRAY
     global LAST_FRAME_TIME
     global FRAME_COUNT
     
@@ -1645,6 +1675,12 @@ def main():
     
     # Initialize algorithm buffers for both RGB and grayscale
     SHARED_ALGORITHM_BUFFER = np.zeros((default_height, default_width, 3), dtype=np.uint8)
+    
+    # Initialize downscaled buffers with small default size (for pixel_s = 2)
+    small_width = default_width // 2
+    small_height = default_height // 2
+    DOWNSCALED_BUFFER_RGB = np.zeros((small_height, small_width, 3), dtype=np.float32)
+    DOWNSCALED_BUFFER_GRAY = np.zeros((small_height, small_width), dtype=np.float32)
     
     LAST_FRAME_TIME = time_module.time()
     FRAME_COUNT = 0
