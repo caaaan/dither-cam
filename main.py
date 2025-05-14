@@ -180,6 +180,9 @@ class CameraCaptureThread(QThread):
         self.camera_initialized = False
         self.camera_lock = threading.Lock()  # Add lock for thread safety
         
+        # Color format conversion flag - set to False to disable BGR->RGB conversion if camera outputs RGB
+        self.should_convert_bgr_to_rgb = True
+        
         # Use global buffer instead of local buffer
         global FRAME_BUFFER_ORIGINAL
         global FRAME_BUFFER_PROCESSING
@@ -480,10 +483,22 @@ class CameraCaptureThread(QThread):
                         if frame.shape[2] == 4:  # Convert RGBA to RGB if needed
                             frame = frame[:, :, :3]
                         
-                        # Convert BGR to RGB for all processing paths
-                        # Simple BGR to RGB conversion with NumPy - more efficient than loading OpenCV
-                        frame = frame[:, :, ::-1].copy()  # Reverse the color channels
+                        # Debug print pixel values before conversion
+                        if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
+                            print(f"Frame pixel values before conversion: R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
                         
+                        # Convert BGR to RGB only if needed
+                        if self.should_convert_bgr_to_rgb:
+                            # Simple BGR to RGB conversion with NumPy - more efficient than loading OpenCV
+                            frame = frame[:, :, ::-1].copy()  # Reverse the color channels
+                            
+                            # Debug print after conversion
+                            if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
+                                print(f"Frame pixel values after conversion: R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
+                        else:
+                            # Just make a copy without changing the color channels
+                            frame = frame.copy()
+                            
                         # Use global buffer instead of thread-local buffer
                         if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != frame.shape:
                             FRAME_BUFFER_ORIGINAL = np.empty_like(frame)
