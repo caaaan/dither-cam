@@ -135,10 +135,7 @@ Future development may include:
 * Hardware acceleration for better performance
 * Web interface for remote control
 * Ability to stream the processed video over a network
-
-## Example Screenshot
-
-![Example Screenshot](example.png)
+* Easy way to send messages to mobile devices/all devices
 
 ## Building the Application
 
