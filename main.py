@@ -181,7 +181,7 @@ class CameraCaptureThread(QThread):
         self.camera_lock = threading.Lock()  # Add lock for thread safety
         
         # Color format conversion flag - set to False to disable BGR->RGB conversion if camera outputs RGB
-        self.should_convert_bgr_to_rgb = True
+        self.should_convert_bgr_to_rgb = False  # Set to False to keep the original color format
         
         # Use global buffer instead of local buffer
         global FRAME_BUFFER_ORIGINAL
@@ -243,7 +243,7 @@ class CameraCaptureThread(QThread):
                 
                 # Create new configuration with updated resolution
                 preview_config = self.camera.create_still_configuration(
-                    main={"size": (new_width, new_height), "format": "RGB888"}
+                    main={"size": (new_width, new_height), "format": "BGR888"}
                 )
                 
                 # Apply new configuration
@@ -385,7 +385,7 @@ class CameraCaptureThread(QThread):
                         
                         # Use the simplest configuration possible with resolution
                         preview_config = self.camera.create_still_configuration(
-                            main={"size": (width, height), "format": "RGB888"}
+                            main={"size": (width, height), "format": "BGR888"}
                         )
                         
                         print(f"Using camera config: {preview_config}")
@@ -401,7 +401,7 @@ class CameraCaptureThread(QThread):
                         time.sleep(3.0)
                         
                         # Add note about picamera2 color format
-                        print("Note: picamera2 typically outputs frames in BGR format, will be converted to RGB")
+                        print("Using BGR color format - no conversion needed for processing")
                         
                         # Test by capturing one frame - if this succeeds, camera is working
                         test_frame = self.camera.capture_array()
@@ -485,7 +485,7 @@ class CameraCaptureThread(QThread):
                         
                         # Debug print pixel values before conversion
                         if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
-                            print(f"Frame pixel values before conversion: R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
+                            print(f"Frame pixel values (BGR): B={frame[0,0,0]}, G={frame[0,0,1]}, R={frame[0,0,2]}")
                         
                         # Convert BGR to RGB only if needed
                         if self.should_convert_bgr_to_rgb:
@@ -494,11 +494,13 @@ class CameraCaptureThread(QThread):
                             
                             # Debug print after conversion
                             if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
-                                print(f"Frame pixel values after conversion: R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
+                                print(f"Frame pixel values after conversion (RGB): R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
                         else:
                             # Just make a copy without changing the color channels
                             frame = frame.copy()
-                            
+                            if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
+                                print("No color channel conversion applied - using BGR format")
+                        
                         # Use global buffer instead of thread-local buffer
                         if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != frame.shape:
                             FRAME_BUFFER_ORIGINAL = np.empty_like(frame)
