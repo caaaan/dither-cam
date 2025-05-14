@@ -181,7 +181,7 @@ class CameraCaptureThread(QThread):
         self.camera_lock = threading.Lock()  # Add lock for thread safety
         
         # Color format conversion flag - set to False to disable BGR->RGB conversion if camera outputs RGB
-        self.should_convert_bgr_to_rgb = False  # Set to False to keep the original color format
+        self.should_convert_bgr_to_rgb = False
         
         # Use global buffer instead of local buffer
         global FRAME_BUFFER_ORIGINAL
@@ -243,7 +243,7 @@ class CameraCaptureThread(QThread):
                 
                 # Create new configuration with updated resolution
                 preview_config = self.camera.create_still_configuration(
-                    main={"size": (new_width, new_height), "format": "BGR888"}
+                    main={"size": (new_width, new_height), "format": "RGB888"}
                 )
                 
                 # Apply new configuration
@@ -385,7 +385,7 @@ class CameraCaptureThread(QThread):
                         
                         # Use the simplest configuration possible with resolution
                         preview_config = self.camera.create_still_configuration(
-                            main={"size": (width, height), "format": "BGR888"}
+                            main={"size": (width, height), "format": "RGB888"}
                         )
                         
                         print(f"Using camera config: {preview_config}")
@@ -401,7 +401,7 @@ class CameraCaptureThread(QThread):
                         time.sleep(3.0)
                         
                         # Add note about picamera2 color format
-                        print("Using BGR color format - no conversion needed for processing")
+                        print("Note: picamera2 typically outputs frames in BGR format, will be converted to RGB")
                         
                         # Test by capturing one frame - if this succeeds, camera is working
                         test_frame = self.camera.capture_array()
@@ -483,24 +483,18 @@ class CameraCaptureThread(QThread):
                         if frame.shape[2] == 4:  # Convert RGBA to RGB if needed
                             frame = frame[:, :, :3]
                         
-                        # Debug print pixel values before conversion
+                        # Debug print pixel values before processing
                         if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
-                            print(f"Frame pixel values (BGR): B={frame[0,0,0]}, G={frame[0,0,1]}, R={frame[0,0,2]}")
+                            print(f"Frame pixel values before processing: R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
                         
-                        # Convert BGR to RGB only if needed
-                        if self.should_convert_bgr_to_rgb:
-                            # Simple BGR to RGB conversion with NumPy - more efficient than loading OpenCV
-                            frame = frame[:, :, ::-1].copy()  # Reverse the color channels
+                        # Use OpenCV for faster color conversion
+                        import cv2
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             
-                            # Debug print after conversion
-                            if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
-                                print(f"Frame pixel values after conversion (RGB): R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
-                        else:
-                            # Just make a copy without changing the color channels
-                            frame = frame.copy()
-                            if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
-                                print("No color channel conversion applied - using BGR format")
-                        
+                        # Debug print after conversion
+                        if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
+                            print(f"Frame pixel values after processing: R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
+                            
                         # Use global buffer instead of thread-local buffer
                         if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != frame.shape:
                             FRAME_BUFFER_ORIGINAL = np.empty_like(frame)
@@ -1386,7 +1380,9 @@ class DitherApp(QMainWindow):
         try:
             # Save the image
             import cv2
-            cv2.imwrite(file_path, frame_to_save)
+            # Convert from RGB to BGR for OpenCV's imwrite
+            frame_to_save_bgr = cv2.cvtColor(frame_to_save, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(file_path, frame_to_save_bgr)
             print(f"Image auto-saved to {file_path}")
         except Exception as e:
             print(f"Error auto-saving image: {e}")
@@ -1455,7 +1451,7 @@ class DitherApp(QMainWindow):
                     img = cv2.imread(file_path)
                     if img is None:
                         raise ImportError("Failed to read with OpenCV")
-                    # Convert BGR to RGB
+                    # Convert BGR to RGB using our helper function for consistency
                     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 except ImportError:
                     # Fall back to PIL
@@ -1685,9 +1681,7 @@ class DitherApp(QMainWindow):
                 # Fall back to OpenCV if PIL is not available
                 import cv2
                 # Convert from RGB to BGR for OpenCV
-                img_to_save_bgr = img_to_save.copy()
-                if len(img_to_save.shape) == 3 and img_to_save.shape[2] == 3:
-                    img_to_save_bgr = img_to_save_bgr[:, :, ::-1]
+                img_to_save_bgr = cv2.cvtColor(img_to_save, cv2.COLOR_RGB2BGR)
                 success = cv2.imwrite(file_path, img_to_save_bgr)
                 if not success:
                     raise RuntimeError(f"OpenCV failed to save image to {file_path}")
