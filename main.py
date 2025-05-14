@@ -5,7 +5,7 @@ import queue
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton, 
                              QLabel, QVBoxLayout, QHBoxLayout, QComboBox, 
                              QSlider, QFileDialog, QSplitter, QCheckBox,
-                             QFrame, QScrollArea)
+                             QFrame, QScrollArea, QGridLayout)
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
 import numpy as np
@@ -196,10 +196,10 @@ class CameraCaptureThread(QThread):
         self.frames_processed = 0
         self.last_report_time = time.time()
         
-        # Resolution control
+        # Resolution control - smaller for 480x320 screen
         self.current_pixel_scale = 1
-        self.base_width = 640  # Base resolution width
-        self.base_height = 480  # Base resolution height
+        self.base_width = 320  # Base resolution width (reduced from 640)
+        self.base_height = 240  # Base resolution height (reduced from 480)
         
         # Dynamic frame skipping for CPU load management
         self.frames_to_skip = 0
@@ -826,7 +826,7 @@ class DitherApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(config.APP_NAME)
-        self.resize(1200, 800)
+        self.resize(480, 320)  # Set to 480x320 for smaller screens
         
         # Use global buffers instead of instance-specific buffers
         global FRAME_BUFFER_ORIGINAL
@@ -1020,33 +1020,33 @@ class DitherApp(QMainWindow):
             self.start_camera()
 
     def setup_ui(self):
-        # Create main splitter widget
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.setCentralWidget(self.splitter)
+        # Create main layout as vertical for small screens
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setSpacing(2)
+        main_layout.setContentsMargins(2, 2, 2, 2)
         
-        # Left panel (80%) - Image display
+        # Image viewer (top portion)
         self.image_panel = QWidget()
         self.image_layout = QVBoxLayout(self.image_panel)
+        self.image_layout.setContentsMargins(1, 1, 1, 1)
+        self.image_layout.setSpacing(1)
         
         # Image viewer with scrollbars
         self.image_viewer = ImageViewer()
         self.image_layout.addWidget(self.image_viewer, 1)
         
-        # "Switch to Original Image" button - will be created and styled later for control_panel
-        self.toggle_button = QPushButton("Switch to Original Image")
+        # "Switch to Original Image" button
+        self.toggle_button = QPushButton("Switch to Original")
         self.toggle_button.clicked.connect(self.toggle_image_display)
         self.toggle_button.setEnabled(False)
-        self.toggle_button.setMinimumWidth(200)
-        self.toggle_button.setFixedHeight(40)
+        self.toggle_button.setFixedHeight(25)
         
-        # Note: toggle_button is NOT added to image_layout here anymore
-        
-        # Right panel (20%) - Controls
+        # Control panel (bottom portion)
         self.control_panel = QWidget()
         self.control_panel.setObjectName("controlPanelBackground")
-
-        # Assuming 'control_panel_background.png' is in the same directory as main.py
-       
+        
         # More specific stylesheet for control_panel and general styles for its children
         self.control_panel.setStyleSheet(f"""
             #controlPanelBackground {{
@@ -1057,17 +1057,20 @@ class DitherApp(QMainWindow):
             #controlPanelBackground QLabel {{
                 background-color: transparent;
                 color: white;
+                font-size: 8pt;
             }}
             #controlPanelBackground QCheckBox {{
                 background-color: transparent;
                 color: white;
+                font-size: 8pt;
             }}
             #controlPanelBackground QPushButton {{
                 border: 1px solid #BBB;
-                border-radius: 15px; 
-                padding: 5px;
-                background-color: rgba(200, 200, 200, 0.3); /* Semi-transparent background */
+                border-radius: 10px; 
+                padding: 2px;
+                background-color: rgba(200, 200, 200, 0.3);
                 color: white;
+                font-size: 8pt;
             }}
             #controlPanelBackground QPushButton:hover {{
                 background-color: rgba(220, 220, 220, 0.5);
@@ -1075,132 +1078,68 @@ class DitherApp(QMainWindow):
             #controlPanelBackground QPushButton:pressed {{
                 background-color: rgba(180, 180, 180, 0.5);
             }}
+            #controlPanelBackground QComboBox {{
+                font-size: 8pt;
+            }}
         """)
 
         self.control_layout = QVBoxLayout(self.control_panel)
-        self.control_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.control_layout.setContentsMargins(10, 20, 10, 20)
-        self.control_layout.setSpacing(10)
+        self.control_layout.setContentsMargins(5, 5, 5, 5)
+        self.control_layout.setSpacing(2)
         
-        control_title = QLabel("Controls")
-        # control_title style will be inherited or can be set specifically if needed
-        self.control_layout.addWidget(control_title)
+        # Create a horizontal layout for top row buttons
+        top_button_layout = QHBoxLayout()
+        top_button_layout.setSpacing(2)
         
-        button_layout = QHBoxLayout()
-        self.open_button = QPushButton("Open Image")
+        # Open and Save buttons
+        self.open_button = QPushButton("Open")
         self.open_button.clicked.connect(self.open_image)
-        self.open_button.setMinimumWidth(120) # Style will come from panel stylesheet
-        button_layout.addWidget(self.open_button)
+        self.open_button.setFixedHeight(25)
+        top_button_layout.addWidget(self.open_button)
         
-        self.save_button = QPushButton("Save Image")
+        self.save_button = QPushButton("Save")
         self.save_button.clicked.connect(self.save_image)
         self.save_button.setEnabled(False)
-        self.save_button.setMinimumWidth(120) # Style will come from panel stylesheet
-        button_layout.addWidget(self.save_button)
-        
-        button_container = QWidget() # This container itself won't get the background image
-        button_container.setLayout(button_layout)
-        self.control_layout.addWidget(button_container, 0, Qt.AlignmentFlag.AlignCenter)
+        self.save_button.setFixedHeight(25)
+        top_button_layout.addWidget(self.save_button)
         
         # Camera buttons
-        camera_button_layout = QHBoxLayout()
-        self.camera_button = QPushButton("Start Camera")
+        self.camera_button = QPushButton("Camera")
         self.camera_button.clicked.connect(self.toggle_camera_mode)
-        self.camera_button.setMinimumWidth(120)
-        
-        # Only enable camera button if picamera is available
+        self.camera_button.setFixedHeight(25)
         self.camera_button.setEnabled(PICAMERA_AVAILABLE)
+        top_button_layout.addWidget(self.camera_button)
         
-        camera_button_layout.addWidget(self.camera_button)
-        
-        self.capture_button = QPushButton("Capture Frame")
+        self.capture_button = QPushButton("Capture")
         self.capture_button.clicked.connect(self.capture_frame)
-        self.capture_button.setMinimumWidth(120)
-        self.capture_button.setEnabled(False)  # Disabled until camera starts
-        camera_button_layout.addWidget(self.capture_button)
+        self.capture_button.setFixedHeight(25)
+        self.capture_button.setEnabled(False)
+        top_button_layout.addWidget(self.capture_button)
         
-        camera_button_container = QWidget()
-        camera_button_container.setLayout(camera_button_layout)
-        self.control_layout.addWidget(camera_button_container, 0, Qt.AlignmentFlag.AlignCenter)
+        # Add toggle button to the top row
+        top_button_layout.addWidget(self.toggle_button)
         
-        # Add horizontal divider
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setFrameShadow(QFrame.Shadow.Sunken)
-        self.control_layout.addWidget(divider)
+        # Add the top button row to control layout
+        self.control_layout.addLayout(top_button_layout)
         
-        # Zoom Slider
-        self.zoom_label = QLabel("Zoom: 100%")
-        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.control_layout.addWidget(self.zoom_label)
-
-        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
-        self.zoom_slider.setRange(10, 500)  # Represents 10% to 500%
-        self.zoom_slider.setValue(100)       # Default 100% (1.0x zoom)
-        self.zoom_slider.setTickInterval(10)
-        self.zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.zoom_slider.valueChanged.connect(self.handle_zoom_slider_change)
-        self.zoom_slider.setMinimumWidth(200)
-        self.control_layout.addWidget(self.zoom_slider, 0, Qt.AlignmentFlag.AlignCenter)
+        # Algorithm, threshold, and other controls in tabbed widget to save space
+        # Create a row for algorithm and RGB/Passthrough
+        algo_row = QHBoxLayout()
         
-        # Algorithm selector 
-        self.algorithm_label = QLabel("Algorithm:")
-        self.algorithm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.control_layout.addWidget(self.algorithm_label)
-        
+        # Algorithm selector
         self.algorithm_combo = QComboBox()
         self.algorithm_combo.addItems(["Floyd-Steinberg", "Bayer", "Simple Threshold"])
         self.algorithm_combo.currentIndexChanged.connect(self.algorithm_changed)
-        self.algorithm_combo.setMinimumWidth(180)
-        self.control_layout.addWidget(self.algorithm_combo, 0, Qt.AlignmentFlag.AlignCenter)
+        self.algorithm_combo.setFixedHeight(22)
+        algo_row.addWidget(self.algorithm_combo)
         
-        # Threshold slider
-        self.threshold_label = QLabel("Threshold: 128")
-        self.threshold_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.control_layout.addWidget(self.threshold_label)
-        
-        self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
-        self.threshold_slider.setRange(1, 254)
-        self.threshold_slider.setValue(128)
-        self.threshold_slider.valueChanged.connect(self.threshold_changed)
-        self.threshold_slider.setMinimumWidth(200)
-        self.control_layout.addWidget(self.threshold_slider, 0, Qt.AlignmentFlag.AlignCenter)
-        
-        # Contrast slider
-        self.contrast_label = QLabel("Contrast: 1.0")
-        self.contrast_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.control_layout.addWidget(self.contrast_label)
-        
-        self.contrast_slider = QSlider(Qt.Orientation.Horizontal)
-        self.contrast_slider.setRange(10, 500)  # 0.1 to 5.0 scaled by 100
-        self.contrast_slider.setValue(100)      # 1.0 * 100
-        self.contrast_slider.valueChanged.connect(self.contrast_changed)
-        self.contrast_slider.setMinimumWidth(200)
-        self.control_layout.addWidget(self.contrast_slider, 0, Qt.AlignmentFlag.AlignCenter)
-        
-        # Pixel Scale slider
-        self.scale_label = QLabel("Pixel Scale: 1")
-        self.scale_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.control_layout.addWidget(self.scale_label)
-        
-        self.scale_slider = QSlider(Qt.Orientation.Horizontal)
-        self.scale_slider.setRange(1, 8)
-        self.scale_slider.setValue(1)
-        self.scale_slider.valueChanged.connect(self.scale_changed)
-        self.scale_slider.setMinimumWidth(200)
-        self.control_layout.addWidget(self.scale_slider, 0, Qt.AlignmentFlag.AlignCenter)
-        
-        # Add another divider
-        divider2 = QFrame()
-        divider2.setFrameShape(QFrame.Shape.HLine)
-        divider2.setFrameShadow(QFrame.Shadow.Sunken)
-        self.control_layout.addWidget(divider2)
-        
-        # Auto-render and RGB checkboxes
+        # Checkbox container
         checkbox_container = QWidget()
         checkbox_layout = QHBoxLayout(checkbox_container)
+        checkbox_layout.setContentsMargins(0, 0, 0, 0)
+        checkbox_layout.setSpacing(2)
         
-        self.auto_render = QCheckBox("Auto-Render")
+        self.auto_render = QCheckBox("Auto")
         self.auto_render.setChecked(True)
         checkbox_layout.addWidget(self.auto_render)
         
@@ -1209,45 +1148,75 @@ class DitherApp(QMainWindow):
         self.rgb_mode.stateChanged.connect(self.rgb_changed)
         checkbox_layout.addWidget(self.rgb_mode)
         
-        # Add pass-through mode checkbox
-        self.pass_through_mode = QCheckBox("Pass-through")
+        self.pass_through_mode = QCheckBox("Pass")
         self.pass_through_mode.setChecked(False)
         self.pass_through_mode.stateChanged.connect(self.pass_through_changed)
         checkbox_layout.addWidget(self.pass_through_mode)
         
-        self.control_layout.addWidget(checkbox_container, 0, Qt.AlignmentFlag.AlignCenter)
+        algo_row.addWidget(checkbox_container)
+        self.control_layout.addLayout(algo_row)
         
-        # Create Apply Dither button (will be added to its own group later)
+        # Sliders in a grid to save space
+        slider_grid = QGridLayout()
+        slider_grid.setVerticalSpacing(2)
+        slider_grid.setHorizontalSpacing(2)
+        
+        # Threshold slider
+        self.threshold_label = QLabel("Thresh: 128")
+        slider_grid.addWidget(self.threshold_label, 0, 0)
+        
+        self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.threshold_slider.setRange(1, 254)
+        self.threshold_slider.setValue(128)
+        self.threshold_slider.valueChanged.connect(self.threshold_changed)
+        self.threshold_slider.setFixedHeight(20)
+        slider_grid.addWidget(self.threshold_slider, 0, 1)
+        
+        # Contrast slider
+        self.contrast_label = QLabel("Contr: 1.0")
+        slider_grid.addWidget(self.contrast_label, 1, 0)
+        
+        self.contrast_slider = QSlider(Qt.Orientation.Horizontal)
+        self.contrast_slider.setRange(10, 500)
+        self.contrast_slider.setValue(100)
+        self.contrast_slider.valueChanged.connect(self.contrast_changed)
+        self.contrast_slider.setFixedHeight(20)
+        slider_grid.addWidget(self.contrast_slider, 1, 1)
+        
+        # Pixel Scale slider
+        self.scale_label = QLabel("Scale: 1")
+        slider_grid.addWidget(self.scale_label, 2, 0)
+        
+        self.scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scale_slider.setRange(1, 8)
+        self.scale_slider.setValue(1)
+        self.scale_slider.valueChanged.connect(self.scale_changed)
+        self.scale_slider.setFixedHeight(20)
+        slider_grid.addWidget(self.scale_slider, 2, 1)
+        
+        # Zoom slider
+        self.zoom_label = QLabel("Zoom: 100%")
+        slider_grid.addWidget(self.zoom_label, 3, 0)
+        
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setRange(10, 500)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.valueChanged.connect(self.handle_zoom_slider_change)
+        self.zoom_slider.setFixedHeight(20)
+        slider_grid.addWidget(self.zoom_slider, 3, 1)
+        
+        self.control_layout.addLayout(slider_grid)
+        
+        # Apply button at the bottom
         self.apply_button = QPushButton("Apply Dither")
         self.apply_button.clicked.connect(self.apply_dither)
-        self.apply_button.setMinimumWidth(200)
-        self.apply_button.setFixedHeight(40)
-        # Individual style removed, will be handled by control_panel stylesheet
-
-        # Add a stretch to push the following button group towards the bottom
-        self.control_layout.addStretch(1)
-
-        # Vertical button group for Toggle and Apply buttons
-        action_button_group_widget = QWidget()
-        action_button_group_layout = QVBoxLayout(action_button_group_widget)
-        action_button_group_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        action_button_group_layout.setSpacing(10) # Spacing between toggle and apply
+        self.apply_button.setFixedHeight(30)
+        self.control_layout.addWidget(self.apply_button)
         
-        action_button_group_layout.addWidget(self.toggle_button) # Switch button on top
-        action_button_group_layout.addWidget(self.apply_button)  # Apply button below
-        
-        self.control_layout.addWidget(action_button_group_widget, 0, Qt.AlignmentFlag.AlignCenter)
-        
-        # Final stretch to take up any remaining space at the very bottom
-        self.control_layout.addStretch(0) 
-        
-        # Add both panels to splitter with 80/20 ratio
-        self.splitter.addWidget(self.image_panel)
-        self.splitter.addWidget(self.control_panel)
-        
-        # Calculate the actual 80/20 split based on the window size
-        total_width = self.width()
-        self.splitter.setSizes([int(total_width * 0.8), int(total_width * 0.2)])
+        # Add control panel and image panel to main layout
+        # Make image panel take 75% of the height
+        main_layout.addWidget(self.image_panel, 75)
+        main_layout.addWidget(self.control_panel, 25)
         
         # Connect ImageViewer zoom changes to update slider/label
         self.image_viewer.zoom_changed.connect(self.update_controls_from_zoom_factor)
@@ -1400,20 +1369,20 @@ class DitherApp(QMainWindow):
             
     def threshold_changed(self, value):
         """Update threshold label and reapply if auto-render is checked"""
-        self.threshold_label.setText(f"Threshold: {value}")
+        self.threshold_label.setText(f"Thresh: {value}")
         if self.auto_render.isChecked():
             self.apply_dither()
             
     def contrast_changed(self, value):
         """Update contrast label and reapply if auto-render is checked"""
         contrast = value / 100.0
-        self.contrast_label.setText(f"Contrast: {contrast:.1f}")
+        self.contrast_label.setText(f"Contr: {contrast:.1f}")
         if self.auto_render.isChecked():
             self.apply_dither()
             
     def scale_changed(self, value):
         """Update scale label and reapply if auto-render is checked"""
-        self.scale_label.setText(f"Pixel Scale: {value}")
+        self.scale_label.setText(f"Scale: {value}")
         if self.auto_render.isChecked():
             self.apply_dither()
             
