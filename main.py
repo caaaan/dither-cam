@@ -639,7 +639,7 @@ class CameraCaptureThread(QThread):
                     small_h = max(1, orig_h // pixel_s)
                     small_w = max(1, orig_w // pixel_s)
                     
-                    if self.rgb_mode.isChecked():
+                    if self.app.rgb_mode.isChecked():
                         # Ensure the shared downscaled buffer has the right dimensions
                         if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
                             DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
@@ -669,7 +669,7 @@ class CameraCaptureThread(QThread):
                         result = nearest_upscale_gray(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                 elif alg == "Simple Threshold":
                     # Apply simple threshold directly with minimal allocations
-                    if self.rgb_mode.isChecked():
+                    if self.app.rgb_mode.isChecked():
                         result = simple_threshold_rgb_ps1(array_to_dither, thr)
                     else:
                         result = np.where(array_to_dither < thr, 0, 255).astype(np.uint8)
@@ -686,7 +686,7 @@ class CameraCaptureThread(QThread):
                     small_h = max(1, orig_h // pixel_s)
                     small_w = max(1, orig_w // pixel_s)
                     
-                    if self.rgb_mode.isChecked():
+                    if self.app.rgb_mode.isChecked():
                         # Ensure the shared downscaled buffer has the right dimensions
                         if DOWNSCALED_BUFFER_RGB is None or DOWNSCALED_BUFFER_RGB.shape[:2] != (small_h, small_w):
                             DOWNSCALED_BUFFER_RGB = np.empty((small_h, small_w, 3), dtype=np.float32)
@@ -716,7 +716,7 @@ class CameraCaptureThread(QThread):
                         result = nearest_upscale_gray(small_result, upscaled, orig_h, orig_w, small_h, small_w, pixel_s)
                 elif alg == "Simple Threshold":
                     # Apply simple threshold directly with minimal allocations
-                    if self.rgb_mode.isChecked():
+                    if self.app.rgb_mode.isChecked():
                         result = simple_threshold_rgb_ps1(array_to_dither, thr)
                     else:
                         result = np.where(array_to_dither < thr, 0, 255).astype(np.uint8)
@@ -724,7 +724,7 @@ class CameraCaptureThread(QThread):
                     result = array_to_dither  # Fallback
             
             # Ensure the result has the same shape as the original
-            if self.rgb_mode.isChecked() and result.shape != orig_shape:
+            if self.app.rgb_mode.isChecked() and result.shape != orig_shape:
                 print(f"Warning: Result shape {result.shape} doesn't match original {orig_shape}")
                 # Attempt to fix the shape
                 if len(result.shape) == 2 and len(orig_shape) == 3:
@@ -735,11 +735,11 @@ class CameraCaptureThread(QThread):
                     result = rgb_result
                 
             # Final dimension check to ensure proper output
-            if result.shape != orig_shape and ((self.rgb_mode.isChecked() and len(orig_shape) == 3) or 
-                                              (not self.rgb_mode.isChecked() and len(orig_shape) == 2)):
+            if result.shape != orig_shape and ((self.app.rgb_mode.isChecked() and len(orig_shape) == 3) or 
+                                              (not self.app.rgb_mode.isChecked() and len(orig_shape) == 2)):
                 print(f"ERROR: Final result shape {result.shape} still doesn't match original {orig_shape}")
                 # Last resort: resize result to match original
-                if self.rgb_mode.isChecked() and len(result.shape) == 3 and len(orig_shape) == 3:
+                if self.app.rgb_mode.isChecked() and len(result.shape) == 3 and len(orig_shape) == 3:
                     # Create a new buffer and manually copy using nearest neighbor
                     fixed_result = np.empty(orig_shape, dtype=np.uint8)
                     result_h, result_w = result.shape[:2]
