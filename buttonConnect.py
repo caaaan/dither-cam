@@ -1,283 +1,174 @@
-import time
-import threading
 from gpiozero import Button
+from signal import pause
+import time
 
-class ButtonConnect:
+# Default GPIO pin configuration - modify these values as needed for your hardware setup
+# BCM pin numbering is used (not physical pin numbers)
+GPIO_UP = 16       # Up button GPIO pin
+GPIO_DOWN = 26     # Down button GPIO pin  
+GPIO_LEFT = 20     # Left button GPIO pin
+GPIO_RIGHT = 19    # Right button GPIO pin
+GPIO_SELECT = 21   # Select/Enter button GPIO pin
+
+# Button press callbacks and state tracking
+button_pressed = {
+    'up': False,
+    'down': False,
+    'left': False, 
+    'right': False,
+    'select': False
+}
+
+last_press_time = {
+    'up': 0,
+    'down': 0,
+    'left': 0,
+    'right': 0,
+    'select': 0
+}
+
+# Global callback functions list
+button_callbacks = {}
+
+# Initialize the buttons
+def init_buttons(pull_up=True, bounce_time=0.05):
     """
-    Interface for GPIO button connections on Raspberry Pi using gpiozero.
-    Handles button press detection and provides callbacks for button events.
+    Initialize all buttons with the specified configuration
+    
+    Args:
+        pull_up (bool): True if buttons should use pull-up resistors (connect to GND when pressed)
+                       False if buttons should use pull-down resistors (connect to 3.3V when pressed)
+        bounce_time (float): Debounce time in seconds
+    
+    Returns:
+        dict: Dictionary of button objects
     """
+    print(f"Initializing buttons (pull_up={pull_up}, bounce_time={bounce_time})")
     
-    # Button states
-    BUTTON_RELEASED = 0
-    BUTTON_PRESSED = 1
+    buttons = {}
+    button_pins = {
+        'up': GPIO_UP,
+        'down': GPIO_DOWN,
+        'left': GPIO_LEFT,
+        'right': GPIO_RIGHT,
+        'select': GPIO_SELECT
+    }
     
-    def __init__(self, button_pins=None, bounce_time=50, pull_up=True):
-        """
-        Initialize GPIO and set up button pins.
-        
-        Args:
-            button_pins (dict): Dictionary mapping button names to GPIO pin numbers
-                                Example: {'up': 17, 'down': 18, 'left': 22, 'right': 23, 'select': 27}
-            bounce_time (int): Debounce time in milliseconds
-            pull_up (bool): True to use internal pull-up resistors (button connects to GND),
-                           False to use pull-down (button connects to 3.3V)
-        """
-        # Default button pins if none provided
-        self.button_pins = button_pins or {
-            'up': 16,
-            'down': 26,
-            'left': 20,
-            'right': 19,
-            'select': 21
-        }
-        
-        # Button state tracking
-        self.button_states = {button: self.BUTTON_RELEASED for button in self.button_pins}
-        self.last_press_time = {button: 0 for button in self.button_pins}
-        self.callbacks = {}
-        
-        # Setup parameters
-        self.bounce_time_s = bounce_time / 1000.0  # Convert ms to seconds for gpiozero
-        self.pull_up = pull_up
-        
-        # Create button objects
-        self.buttons = {}
-        
-        print(f"Initializing buttons with pull_up={pull_up}")
-        for button_name, pin in self.button_pins.items():
-            print(f"Setting up {button_name} button on GPIO {pin}")
-            try:
-                # Create gpiozero Button object with correct parameters
-                btn = Button(pin=pin, pull_up=pull_up, bounce_time=self.bounce_time_s)
-                
-                # Store internal reference to this button
-                self.buttons[button_name] = btn
-                
-                # Define proper callbacks using lambda with default args to capture current value
-                btn.when_pressed = lambda b=button_name: self._handle_button_pressed(b)
-                btn.when_released = lambda b=button_name: self._handle_button_released(b)
-                
-                print(f"  {button_name} initialized on GPIO {pin}")
-            except Exception as e:
-                print(f"Error initializing button {button_name} on pin {pin}: {e}")
-                
-        # Polling thread for continuous state monitoring
-        self.polling = False
-        self.poll_thread = None
-    
-    def start_polling(self, interval=0.05):
-        """
-        Start a polling thread to continuously monitor button states.
-        
-        Args:
-            interval (float): Polling interval in seconds
-        """
-        if self.polling:
-            return
+    for name, pin in button_pins.items():
+        try:
+            print(f"Setting up {name} button on GPIO {pin}")
+            # Create Button object with the specified parameters
+            buttons[name] = Button(pin=pin, pull_up=pull_up, bounce_time=bounce_time)
             
-        self.polling = True
-        self.poll_thread = threading.Thread(target=self._poll_buttons, args=(interval,))
-        self.poll_thread.daemon = True
-        self.poll_thread.start()
-        print("Button polling started")
-    
-    def stop_polling(self):
-        """Stop the polling thread"""
-        self.polling = False
-        if self.poll_thread:
-            self.poll_thread.join(timeout=1.0)
-            self.poll_thread = None
-    
-    def _poll_buttons(self, interval):
-        """
-        Continuously poll button states.
-        
-        Args:
-            interval (float): Polling interval in seconds
-        """
-        while self.polling:
-            for button_name in self.button_pins.keys():
-                if button_name in self.buttons:
-                    # Update button state from gpiozero object
-                    is_pressed = self.buttons[button_name].is_pressed
-                    self.button_states[button_name] = self.BUTTON_PRESSED if is_pressed else self.BUTTON_RELEASED
-            time.sleep(interval)
-    
-    def _handle_button_pressed(self, button):
-        """
-        Handle button press events and invoke callbacks.
-        
-        Args:
-            button (str): Button name
-        """
-        # Update button press time
-        current_time = time.time()
-        self.last_press_time[button] = current_time
-        
-        # Update state
-        self.button_states[button] = self.BUTTON_PRESSED
-        print(f"Button pressed: {button}")
-        
-        # Call button-specific callback if registered
-        if button in self.callbacks:
-            self.callbacks[button](button)
-        
-        # Call general callback if registered
-        if 'all' in self.callbacks:
-            self.callbacks['all'](button)
-    
-    def _handle_button_released(self, button):
-        """
-        Handle button release events.
-        
-        Args:
-            button (str): Button name
-        """
-        self.button_states[button] = self.BUTTON_RELEASED
-        print(f"Button released: {button}")
-    
-    def register_callback(self, button, callback_function):
-        """
-        Register a callback function for a specific button.
-        
-        Args:
-            button (str): Button name or 'all' for all buttons
-            callback_function (callable): Function to call when button is pressed
-        """
-        self.callbacks[button] = callback_function
-        print(f"Registered callback for button: {button}")
-    
-    def is_pressed(self, button):
-        """
-        Check if a button is currently pressed.
-        
-        Args:
-            button (str): Button name
-        
-        Returns:
-            bool: True if the button is pressed, False otherwise
-        """
-        if button not in self.buttons:
-            return False
-        
-        return self.buttons[button].is_pressed
-    
-    def was_pressed_recently(self, button, timeout=0.5):
-        """
-        Check if a button was pressed within the specified timeout.
-        
-        Args:
-            button (str): Button name
-            timeout (float): Time window in seconds
-        
-        Returns:
-            bool: True if the button was pressed within the timeout, False otherwise
-        """
-        if button not in self.last_press_time:
-            return False
+            # Set up the button event handlers
+            buttons[name].when_pressed = lambda n=name: handle_button_pressed(n)
+            buttons[name].when_released = lambda n=name: handle_button_released(n)
             
-        return (time.time() - self.last_press_time[button]) < timeout
+            print(f"  {name} initialized successfully")
+        except Exception as e:
+            print(f"Error initializing {name} button on GPIO {pin}: {e}")
     
-    def get_all_pressed(self):
-        """
-        Get list of all currently pressed buttons.
-        
-        Returns:
-            list: List of button names that are currently pressed
-        """
-        pressed = []
-        for button_name, button in self.buttons.items():
-            try:
-                if button.is_pressed:
-                    pressed.append(button_name)
-            except:
-                pass
-        return pressed
-    
-    def get_button_pins(self):
-        """
-        Get the current button pin configuration.
-        
-        Returns:
-            dict: Dictionary mapping button names to GPIO pins
-        """
-        return self.button_pins.copy()
-    
-    def set_button_pin(self, button, pin):
-        """
-        Update a button's GPIO pin number.
-        
-        Args:
-            button (str): Button name
-            pin (int): GPIO pin number
-        """
-        # Clean up old button if it exists
-        if button in self.buttons:
-            old_button = self.buttons[button]
-            old_button.close()
-            
-        # Create new button object
-        self.button_pins[button] = pin
-        new_button = Button(
-            pin=pin, 
-            pull_up=self.pull_up,
-            bounce_time=self.bounce_time_s
-        )
-        
-        # Set up callbacks
-        new_button.when_pressed = lambda b=button: self._handle_button_pressed(b)
-        new_button.when_released = lambda b=button: self._handle_button_released(b)
-        
-        # Store button
-        self.buttons[button] = new_button
-        print(f"Updated button {button} to GPIO pin {pin}")
-    
-    def cleanup(self):
-        """Clean up GPIO resources"""
-        self.stop_polling()
-        print("Cleaning up GPIO resources...")
-        for button in self.buttons.values():
-            button.close()
-        print("Cleanup complete")
+    return buttons
 
+def handle_button_pressed(button_name):
+    """
+    Handler for button press events
+    
+    Args:
+        button_name (str): Name of the button that was pressed
+    """
+    # Update button state
+    button_pressed[button_name] = True
+    last_press_time[button_name] = time.time()
+    
+    print(f"Button pressed: {button_name}")
+    
+    # Call registered callbacks
+    if button_name in button_callbacks:
+        button_callbacks[button_name](button_name)
+    if 'all' in button_callbacks:
+        button_callbacks['all'](button_name)
 
-# Example usage
+def handle_button_released(button_name):
+    """
+    Handler for button release events
+    
+    Args:
+        button_name (str): Name of the button that was released
+    """
+    # Update button state
+    button_pressed[button_name] = False
+    print(f"Button released: {button_name}")
+
+def register_callback(button_name, callback_function):
+    """
+    Register a callback function for a specific button
+    
+    Args:
+        button_name (str): Name of button ('up', 'down', 'left', 'right', 'select', or 'all')
+        callback_function (callable): Function to call when button is pressed
+    """
+    button_callbacks[button_name] = callback_function
+    print(f"Registered callback for button: {button_name}")
+
+def get_pressed_buttons():
+    """
+    Get list of all currently pressed buttons
+    
+    Returns:
+        list: Names of buttons currently pressed
+    """
+    return [name for name, pressed in button_pressed.items() if pressed]
+
+def was_pressed_recently(button_name, timeout=0.5):
+    """
+    Check if a button was pressed recently within the specified timeout
+    
+    Args:
+        button_name (str): Name of the button to check
+        timeout (float): Time window in seconds
+        
+    Returns:
+        bool: True if button was pressed within the timeout period
+    """
+    if button_name not in last_press_time:
+        return False
+    
+    return (time.time() - last_press_time[button_name]) < timeout
+
+def cleanup():
+    """Release all GPIO resources"""
+    print("Cleaning up GPIO resources...")
+    # The Button objects will be automatically cleaned up when they go out of scope
+    # This is handled by gpiozero's Device.close() methods
+    print("Cleanup complete")
+
+# Example test function if this file is run directly
 if __name__ == "__main__":
     try:
         print("Button Connect Test")
         print("===================")
         print("Press buttons to see inputs (Ctrl+C to exit)")
         
-        # Initialize with default pins - change this if needed for your hardware
-        # pull_up=True means buttons should connect to GND when pressed
-        # pull_up=False means buttons should connect to 3.3V when pressed
-        buttons = ButtonConnect(pull_up=True)
+        # Initialize buttons - change pull_up based on your hardware setup
+        # pull_up=True means buttons connect to GND when pressed
+        # pull_up=False means buttons connect to 3.3V when pressed
+        buttons = init_buttons(pull_up=True)
         
-        # Register a callback for all buttons
+        # Register a test callback for all buttons
         def button_callback(button):
             print(f"CALLBACK: Button {button} was pressed!")
         
-        buttons.register_callback('all', button_callback)
-        
-        # Start polling
-        buttons.start_polling()
+        register_callback('all', button_callback)
         
         print("\nWaiting for button presses...")
         print("Try pressing each button to test.")
-        print("Currently monitoring buttons:", list(buttons.button_pins.keys()))
         print("Press Ctrl+C to exit\n")
         
-        # Main loop - just monitor button states
-        while True:
-            pressed = buttons.get_all_pressed()
-            if pressed:
-                print(f"Currently pressed: {pressed}")
-            time.sleep(0.2)  # Reduce console spam
-    
+        # Keep the program running to receive button press events
+        pause()  # This will wait until interrupted
+        
     except KeyboardInterrupt:
         print("\nExiting...")
     finally:
-        # Clean up
-        if 'buttons' in locals():
-            buttons.cleanup() 
+        cleanup() 
