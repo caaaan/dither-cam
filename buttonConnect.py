@@ -1,10 +1,10 @@
-import RPi.GPIO as GPIO
 import time
 import threading
+from gpiozero import Button
 
 class ButtonConnect:
     """
-    Interface for GPIO button connections on Raspberry Pi.
+    Interface for GPIO button connections on Raspberry Pi using gpiozero.
     Handles button press detection and provides callbacks for button events.
     """
     
@@ -23,9 +23,6 @@ class ButtonConnect:
             pull_up (bool): True to use internal pull-up resistors (button connects to GND),
                            False to use pull-down (button connects to 3.3V)
         """
-        # Configure GPIO
-        GPIO.setmode(GPIO.BCM)  # Use BCM pin numbering
-        
         # Default button pins if none provided
         self.button_pins = button_pins or {
             'up': 17,
@@ -41,15 +38,22 @@ class ButtonConnect:
         self.callbacks = {}
         
         # Setup parameters
-        self.bounce_time = bounce_time
-        self.pull_up_down = GPIO.PUD_UP if pull_up else GPIO.PUD_DOWN
-        self.input_event = GPIO.FALLING if pull_up else GPIO.RISING
+        self.bounce_time_s = bounce_time / 1000.0  # Convert ms to seconds for gpiozero
+        self.pull_up = pull_up
         
-        # Set up GPIO pins for buttons
+        # Create button objects
+        self.buttons = {}
         for button, pin in self.button_pins.items():
-            GPIO.setup(pin, GPIO.IN, pull_up_down=self.pull_up_down)
-            GPIO.add_event_detect(pin, self.input_event, callback=lambda channel, btn=button: self._handle_button_event(btn), 
-                                  bouncetime=self.bounce_time)
+            # Create gpiozero Button object
+            self.buttons[button] = Button(
+                pin=pin, 
+                pull_up=pull_up,
+                bounce_time=self.bounce_time_s
+            )
+            
+            # Set up callbacks
+            self.buttons[button].when_pressed = lambda btn=button: self._handle_button_pressed(btn)
+            self.buttons[button].when_released = lambda btn=button: self._handle_button_released(btn)
                                   
         # Polling thread for continuous state monitoring
         self.polling = False
@@ -85,19 +89,14 @@ class ButtonConnect:
             interval (float): Polling interval in seconds
         """
         while self.polling:
-            for button, pin in self.button_pins.items():
-                # Read current state (pull-up means button pressed when pin reads LOW)
-                current_state = GPIO.LOW if GPIO.input(pin) == GPIO.LOW else GPIO.HIGH
-                button_pressed = (current_state == GPIO.LOW) if self.pull_up_down == GPIO.PUD_UP else (current_state == GPIO.HIGH)
-                
-                # Update button state
-                self.button_states[button] = self.BUTTON_PRESSED if button_pressed else self.BUTTON_RELEASED
-                
+            for button in self.button_pins.keys():
+                # Update button state from gpiozero object
+                self.button_states[button] = self.BUTTON_PRESSED if self.buttons[button].is_pressed else self.BUTTON_RELEASED
             time.sleep(interval)
     
-    def _handle_button_event(self, button):
+    def _handle_button_pressed(self, button):
         """
-        Handle button press/release events and invoke callbacks.
+        Handle button press events and invoke callbacks.
         
         Args:
             button (str): Button name
@@ -116,6 +115,15 @@ class ButtonConnect:
         # Call general callback if registered
         if 'all' in self.callbacks:
             self.callbacks['all'](button)
+    
+    def _handle_button_released(self, button):
+        """
+        Handle button release events.
+        
+        Args:
+            button (str): Button name
+        """
+        self.button_states[button] = self.BUTTON_RELEASED
     
     def register_callback(self, button, callback_function):
         """
@@ -137,14 +145,10 @@ class ButtonConnect:
         Returns:
             bool: True if the button is pressed, False otherwise
         """
-        if button not in self.button_pins:
+        if button not in self.buttons:
             return False
         
-        pin = self.button_pins[button]
-        state = GPIO.input(pin)
-        
-        # For pull-up, pressed is LOW; for pull-down, pressed is HIGH
-        return state == GPIO.LOW if self.pull_up_down == GPIO.PUD_UP else state == GPIO.HIGH
+        return self.buttons[button].is_pressed
     
     def was_pressed_recently(self, button, timeout=0.5):
         """
@@ -169,7 +173,7 @@ class ButtonConnect:
         Returns:
             list: List of button names that are currently pressed
         """
-        return [button for button, pin in self.button_pins.items() if self.is_pressed(button)]
+        return [button for button in self.buttons if self.buttons[button].is_pressed]
     
     def get_button_pins(self):
         """
@@ -188,21 +192,28 @@ class ButtonConnect:
             button (str): Button name
             pin (int): GPIO pin number
         """
-        # Clean up old pin if it exists
-        if button in self.button_pins:
-            old_pin = self.button_pins[button]
-            GPIO.remove_event_detect(old_pin)
+        # Clean up old button if it exists
+        if button in self.buttons:
+            old_button = self.buttons[button]
+            old_button.close()
             
-        # Set up new pin
+        # Create new button object
         self.button_pins[button] = pin
-        GPIO.setup(pin, GPIO.IN, pull_up_down=self.pull_up_down)
-        GPIO.add_event_detect(pin, self.input_event, callback=lambda channel, btn=button: self._handle_button_event(btn), 
-                              bouncetime=self.bounce_time)
+        self.buttons[button] = Button(
+            pin=pin, 
+            pull_up=self.pull_up,
+            bounce_time=self.bounce_time_s
+        )
+        
+        # Set up callbacks
+        self.buttons[button].when_pressed = lambda btn=button: self._handle_button_pressed(btn)
+        self.buttons[button].when_released = lambda btn=button: self._handle_button_released(btn)
     
     def cleanup(self):
         """Clean up GPIO resources"""
         self.stop_polling()
-        GPIO.cleanup([pin for pin in self.button_pins.values()])
+        for button in self.buttons.values():
+            button.close()
 
 
 # Example usage
