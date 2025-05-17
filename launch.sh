@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Launch script for dither-cam application
-
+# DONT FORGET TO RUN "chmod +x launch.sh" TO MAKE THE FILE EXECUTABLE
 show_help() {
     echo "Usage: ./launch.sh [OPTION]"
     echo "Launch the dither-cam application in different configurations."
