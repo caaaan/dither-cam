@@ -45,43 +45,26 @@ class ButtonConnect:
         self.buttons = {}
         
         print(f"Initializing buttons with pull_up={pull_up}")
-        for button, pin in self.button_pins.items():
-            print(f"Setting up {button} button on GPIO {pin}")
-            # Create button handler functions (must be defined outside the loop to prevent closure issues)
-            press_func = self._create_press_handler(button)
-            release_func = self._create_release_handler(button)
-            
-            # Create gpiozero Button object
+        for button_name, pin in self.button_pins.items():
+            print(f"Setting up {button_name} button on GPIO {pin}")
             try:
-                self.buttons[button] = Button(
-                    pin=pin, 
-                    pull_up=pull_up,
-                    bounce_time=self.bounce_time_s
-                )
+                # Create gpiozero Button object with correct parameters
+                btn = Button(pin=pin, pull_up=pull_up, bounce_time=self.bounce_time_s)
                 
-                # Set up callbacks
-                self.buttons[button].when_pressed = press_func
-                self.buttons[button].when_released = release_func
+                # Store internal reference to this button
+                self.buttons[button_name] = btn
                 
-                print(f"  {button} initialized on GPIO {pin}")
+                # Define proper callbacks using lambda with default args to capture current value
+                btn.when_pressed = lambda b=button_name: self._handle_button_pressed(b)
+                btn.when_released = lambda b=button_name: self._handle_button_released(b)
+                
+                print(f"  {button_name} initialized on GPIO {pin}")
             except Exception as e:
-                print(f"Error initializing button {button} on pin {pin}: {e}")
+                print(f"Error initializing button {button_name} on pin {pin}: {e}")
                 
         # Polling thread for continuous state monitoring
         self.polling = False
         self.poll_thread = None
-    
-    def _create_press_handler(self, button_name):
-        """Create a press handler function for a specific button"""
-        def handler():
-            self._handle_button_pressed(button_name)
-        return handler
-    
-    def _create_release_handler(self, button_name):
-        """Create a release handler function for a specific button"""
-        def handler():
-            self._handle_button_released(button_name)
-        return handler
     
     def start_polling(self, interval=0.05):
         """
@@ -114,10 +97,11 @@ class ButtonConnect:
             interval (float): Polling interval in seconds
         """
         while self.polling:
-            for button in self.button_pins.keys():
-                # Update button state from gpiozero object
-                is_pressed = self.buttons[button].is_pressed
-                self.button_states[button] = self.BUTTON_PRESSED if is_pressed else self.BUTTON_RELEASED
+            for button_name in self.button_pins.keys():
+                if button_name in self.buttons:
+                    # Update button state from gpiozero object
+                    is_pressed = self.buttons[button_name].is_pressed
+                    self.button_states[button_name] = self.BUTTON_PRESSED if is_pressed else self.BUTTON_RELEASED
             time.sleep(interval)
     
     def _handle_button_pressed(self, button):
@@ -133,6 +117,7 @@ class ButtonConnect:
         
         # Update state
         self.button_states[button] = self.BUTTON_PRESSED
+        print(f"Button pressed: {button}")
         
         # Call button-specific callback if registered
         if button in self.callbacks:
@@ -150,6 +135,7 @@ class ButtonConnect:
             button (str): Button name
         """
         self.button_states[button] = self.BUTTON_RELEASED
+        print(f"Button released: {button}")
     
     def register_callback(self, button, callback_function):
         """
@@ -202,8 +188,11 @@ class ButtonConnect:
         """
         pressed = []
         for button_name, button in self.buttons.items():
-            if button.is_pressed:
-                pressed.append(button_name)
+            try:
+                if button.is_pressed:
+                    pressed.append(button_name)
+            except:
+                pass
         return pressed
     
     def get_button_pins(self):
@@ -228,22 +217,20 @@ class ButtonConnect:
             old_button = self.buttons[button]
             old_button.close()
             
-        # Create button handler functions
-        press_func = self._create_press_handler(button)
-        release_func = self._create_release_handler(button)
-            
         # Create new button object
         self.button_pins[button] = pin
-        self.buttons[button] = Button(
+        new_button = Button(
             pin=pin, 
             pull_up=self.pull_up,
             bounce_time=self.bounce_time_s
         )
         
         # Set up callbacks
-        self.buttons[button].when_pressed = press_func
-        self.buttons[button].when_released = release_func
+        new_button.when_pressed = lambda b=button: self._handle_button_pressed(b)
+        new_button.when_released = lambda b=button: self._handle_button_released(b)
         
+        # Store button
+        self.buttons[button] = new_button
         print(f"Updated button {button} to GPIO pin {pin}")
     
     def cleanup(self):
@@ -262,27 +249,31 @@ if __name__ == "__main__":
         print("===================")
         print("Press buttons to see inputs (Ctrl+C to exit)")
         
-        # Initialize with default pins
-        buttons = ButtonConnect(pull_up=True)  # Set to False if your buttons are connected to 3.3V
+        # Initialize with default pins - change this if needed for your hardware
+        # pull_up=True means buttons should connect to GND when pressed
+        # pull_up=False means buttons should connect to 3.3V when pressed
+        buttons = ButtonConnect(pull_up=True)
         
         # Register a callback for all buttons
         def button_callback(button):
-            print(f"PRESSED: {button}")
+            print(f"CALLBACK: Button {button} was pressed!")
         
         buttons.register_callback('all', button_callback)
         
         # Start polling
         buttons.start_polling()
         
-        print("Waiting for button presses... (Press Ctrl+C to exit)")
+        print("\nWaiting for button presses...")
+        print("Try pressing each button to test.")
+        print("Currently monitoring buttons:", list(buttons.button_pins.keys()))
+        print("Press Ctrl+C to exit\n")
         
         # Main loop - just monitor button states
         while True:
             pressed = buttons.get_all_pressed()
             if pressed:
-                # Only print if we detected buttons being pressed
                 print(f"Currently pressed: {pressed}")
-            time.sleep(0.2)  # Increase sleep time to reduce console spam
+            time.sleep(0.2)  # Reduce console spam
     
     except KeyboardInterrupt:
         print("\nExiting...")
