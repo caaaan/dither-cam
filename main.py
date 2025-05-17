@@ -7,9 +7,10 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton,
                              QSlider, QFileDialog, QSplitter, QCheckBox,
                              QFrame, QScrollArea, QGridLayout)
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QThread, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
+from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QKeySequence, QShortcut
 import numpy as np
 import os, config
+import cv2
 from helper import (fs_dither, simple_threshold_rgb_ps1, simple_threshold_dither, 
                    block_average_rgb, block_average_gray, nearest_upscale_rgb, 
                    nearest_upscale_gray, downscale_dither_upscale, bgr_to_rgb, 
@@ -483,17 +484,12 @@ class CameraCaptureThread(QThread):
                         if frame.shape[2] == 4:  # Convert RGBA to RGB if needed
                             frame = frame[:, :, :3]
                         
-                        # Debug print pixel values before processing
-                        if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
-                            print(f"Frame pixel values before processing: R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
-                        
+                                                 
                         # Use OpenCV for faster color conversion
-                        import cv2
+                        
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             
                         # Debug print after conversion
-                        if frames_captured % 90 == 0:  # Print every ~3 seconds at 30fps
-                            print(f"Frame pixel values after processing: R={frame[0,0,0]}, G={frame[0,0,1]}, B={frame[0,0,2]}")
                             
                         # Use global buffer instead of thread-local buffer
                         if FRAME_BUFFER_ORIGINAL is None or FRAME_BUFFER_ORIGINAL.shape != frame.shape:
@@ -827,9 +823,20 @@ class DitherApp(QMainWindow):
         super().__init__()
         self.setWindowTitle(config.APP_NAME)
         
-        # Set to exactly 480x320 and remove window decorations for small screens
+        # Set to exactly 480x320 by default without removing window frame
         self.resize(480, 320)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)  # Remove window frame
+        
+        # Store fullscreen state
+        self.is_fullscreen = False
+        
+        # Add keyboard shortcuts
+        # F11 for fullscreen toggle
+        fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
+        fullscreen_shortcut.activated.connect(self.toggle_fullscreen)
+        
+        # Escape to exit fullscreen or close app
+        escape_shortcut = QShortcut(QKeySequence("Escape"), self)
+        escape_shortcut.activated.connect(self.handle_escape)
         
         # Use global buffers instead of instance-specific buffers
         global FRAME_BUFFER_ORIGINAL
@@ -1225,15 +1232,22 @@ class DitherApp(QMainWindow):
         
         self.control_layout.addLayout(slider_grid)
         
-        # Apply button at the bottom with Exit button
+        # Add buttons at the bottom
         button_row = QHBoxLayout()
         button_row.setSpacing(1)
         button_row.setContentsMargins(0, 0, 0, 0)
         
-        self.exit_button = QPushButton("Exit")
-        self.exit_button.clicked.connect(self.close)
+        # Fullscreen toggle button
+        self.exit_button = QPushButton("Full")
+        self.exit_button.clicked.connect(self.toggle_fullscreen)
         self.exit_button.setFixedHeight(20)
         button_row.addWidget(self.exit_button)
+        
+        # Close button
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        self.close_button.setFixedHeight(20)
+        button_row.addWidget(self.close_button)
         
         self.apply_button = QPushButton("Apply Dither")
         self.apply_button.clicked.connect(self.apply_dither)
@@ -1689,10 +1703,39 @@ class DitherApp(QMainWindow):
             import traceback
             traceback.print_exc()
 
+    def toggle_fullscreen(self):
+        """Toggle between fullscreen and windowed mode"""
+        if self.is_fullscreen:
+            # Return to windowed mode
+            self.showNormal()
+            self.is_fullscreen = False
+            if hasattr(self, 'exit_button'):
+                self.exit_button.setText("Full")
+        else:
+            # Go to fullscreen mode
+            self.showFullScreen()
+            self.is_fullscreen = True
+            if hasattr(self, 'exit_button'):
+                self.exit_button.setText("Exit")
+
+    def handle_escape(self):
+        """Handle the Escape key press to exit fullscreen or close the application"""
+        if self.is_fullscreen:
+            self.toggle_fullscreen()
+        else:
+            self.close()
+
 def main():
     """Main application entry point with initialization of global frame buffers"""
     # Make sure time module is accessible throughout
     import time as time_module
+    
+    # Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description='Dither Camera Application')
+    parser.add_argument('--fullscreen', '-f', action='store_true', help='Launch in fullscreen mode')
+    parser.add_argument('--resolution', '-r', default='480x320', help='Window resolution (e.g. 480x320)')
+    args = parser.parse_args()
     
     # Initialize global frame handling variables
     global FRAME_BUFFER_ORIGINAL
@@ -1843,6 +1886,21 @@ def main():
 
     app = QApplication(sys.argv)
     window = DitherApp()
+    
+    # Apply resolution from command line if provided
+    if args.resolution:
+        try:
+            width, height = map(int, args.resolution.split('x'))
+            window.resize(width, height)
+            print(f"Setting window size to {width}x{height}")
+        except ValueError:
+            print(f"Invalid resolution format: {args.resolution}, using default 480x320")
+    
+    # Show fullscreen if requested
+    if args.fullscreen:
+        window.toggle_fullscreen()
+        print("Starting in fullscreen mode")
+    
     window.show()
     sys.exit(app.exec())
 
