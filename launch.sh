@@ -23,7 +23,7 @@ show_help() {
 FULLSCREEN=false
 RESOLUTION="480x320"
 
-
+# Parse command line arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -f|--fullscreen) FULLSCREEN=true ;;
@@ -35,10 +35,22 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
-CMD="source venv/bin/activate && python3 main.py --resolution $RESOLUTION"
+# Build command arguments
+ARGS="--resolution $RESOLUTION"
 if [ "$FULLSCREEN" = true ]; then
-    CMD="$CMD --fullscreen"
+    ARGS="$ARGS --fullscreen"
 fi
 
-echo "Launching dither-cam with command: $CMD"
-$CMD 
+# Display what we're going to run
+echo "Launching dither-cam with resolution: $RESOLUTION, fullscreen: $FULLSCREEN"
+
+# Check if virtual environment exists and activate it
+if [ -d "venv" ] && [ -f "venv/bin/activate" ]; then
+    echo "Activating virtual environment..."
+    source venv/bin/activate
+    # Run the Python script with arguments
+    python3 main.py $ARGS
+else
+    echo "Virtual environment not found. Running with system Python..."
+    python3 main.py $ARGS
+fi 
