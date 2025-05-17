@@ -826,7 +826,10 @@ class DitherApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(config.APP_NAME)
-        self.resize(480, 320)  # Set to 480x320 for smaller screens
+        
+        # Set to exactly 480x320 and remove window decorations for small screens
+        self.resize(480, 320)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)  # Remove window frame
         
         # Use global buffers instead of instance-specific buffers
         global FRAME_BUFFER_ORIGINAL
@@ -1024,14 +1027,14 @@ class DitherApp(QMainWindow):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
-        main_layout.setSpacing(2)
-        main_layout.setContentsMargins(2, 2, 2, 2)
+        main_layout.setSpacing(0)  # No spacing between panels
+        main_layout.setContentsMargins(0, 0, 0, 0)  # No margins around the main layout
         
         # Image viewer (top portion)
         self.image_panel = QWidget()
         self.image_layout = QVBoxLayout(self.image_panel)
-        self.image_layout.setContentsMargins(1, 1, 1, 1)
-        self.image_layout.setSpacing(1)
+        self.image_layout.setContentsMargins(0, 0, 0, 0)  # No margins in image panel
+        self.image_layout.setSpacing(0)  # No spacing in image panel
         
         # Image viewer with scrollbars
         self.image_viewer = ImageViewer()
@@ -1058,19 +1061,24 @@ class DitherApp(QMainWindow):
                 background-color: transparent;
                 color: white;
                 font-size: 8pt;
+                padding: 0px;
+                margin: 0px;
             }}
             #controlPanelBackground QCheckBox {{
                 background-color: transparent;
                 color: white;
                 font-size: 8pt;
+                padding: 0px;
+                margin: 0px;
             }}
             #controlPanelBackground QPushButton {{
                 border: 1px solid #BBB;
                 border-radius: 10px; 
-                padding: 2px;
+                padding: 1px;
                 background-color: rgba(200, 200, 200, 0.3);
                 color: white;
                 font-size: 8pt;
+                margin: 0px;
             }}
             #controlPanelBackground QPushButton:hover {{
                 background-color: rgba(220, 220, 220, 0.5);
@@ -1080,39 +1088,46 @@ class DitherApp(QMainWindow):
             }}
             #controlPanelBackground QComboBox {{
                 font-size: 8pt;
+                padding: 1px;
+                margin: 0px;
+            }}
+            #controlPanelBackground QSlider {{
+                margin: 0px;
+                padding: 0px;
             }}
         """)
 
         self.control_layout = QVBoxLayout(self.control_panel)
-        self.control_layout.setContentsMargins(5, 5, 5, 5)
-        self.control_layout.setSpacing(2)
+        self.control_layout.setContentsMargins(2, 2, 2, 2)  # Minimal margins in control panel
+        self.control_layout.setSpacing(1)  # Minimal spacing in control panel
         
         # Create a horizontal layout for top row buttons
         top_button_layout = QHBoxLayout()
-        top_button_layout.setSpacing(2)
+        top_button_layout.setSpacing(1)
+        top_button_layout.setContentsMargins(0, 0, 0, 0)
         
         # Open and Save buttons
         self.open_button = QPushButton("Open")
         self.open_button.clicked.connect(self.open_image)
-        self.open_button.setFixedHeight(25)
+        self.open_button.setFixedHeight(20)
         top_button_layout.addWidget(self.open_button)
         
         self.save_button = QPushButton("Save")
         self.save_button.clicked.connect(self.save_image)
         self.save_button.setEnabled(False)
-        self.save_button.setFixedHeight(25)
+        self.save_button.setFixedHeight(20)
         top_button_layout.addWidget(self.save_button)
         
         # Camera buttons
         self.camera_button = QPushButton("Camera")
         self.camera_button.clicked.connect(self.toggle_camera_mode)
-        self.camera_button.setFixedHeight(25)
+        self.camera_button.setFixedHeight(20)
         self.camera_button.setEnabled(PICAMERA_AVAILABLE)
         top_button_layout.addWidget(self.camera_button)
         
         self.capture_button = QPushButton("Capture")
         self.capture_button.clicked.connect(self.capture_frame)
-        self.capture_button.setFixedHeight(25)
+        self.capture_button.setFixedHeight(20)
         self.capture_button.setEnabled(False)
         top_button_layout.addWidget(self.capture_button)
         
@@ -1125,19 +1140,21 @@ class DitherApp(QMainWindow):
         # Algorithm, threshold, and other controls in tabbed widget to save space
         # Create a row for algorithm and RGB/Passthrough
         algo_row = QHBoxLayout()
+        algo_row.setSpacing(1)
+        algo_row.setContentsMargins(0, 0, 0, 0)
         
         # Algorithm selector
         self.algorithm_combo = QComboBox()
         self.algorithm_combo.addItems(["Floyd-Steinberg", "Bayer", "Simple Threshold"])
         self.algorithm_combo.currentIndexChanged.connect(self.algorithm_changed)
-        self.algorithm_combo.setFixedHeight(22)
+        self.algorithm_combo.setFixedHeight(20)
         algo_row.addWidget(self.algorithm_combo)
         
         # Checkbox container
         checkbox_container = QWidget()
         checkbox_layout = QHBoxLayout(checkbox_container)
         checkbox_layout.setContentsMargins(0, 0, 0, 0)
-        checkbox_layout.setSpacing(2)
+        checkbox_layout.setSpacing(0)
         
         self.auto_render = QCheckBox("Auto")
         self.auto_render.setChecked(True)
@@ -1158,8 +1175,9 @@ class DitherApp(QMainWindow):
         
         # Sliders in a grid to save space
         slider_grid = QGridLayout()
-        slider_grid.setVerticalSpacing(2)
-        slider_grid.setHorizontalSpacing(2)
+        slider_grid.setVerticalSpacing(1)
+        slider_grid.setHorizontalSpacing(1)
+        slider_grid.setContentsMargins(0, 0, 0, 0)
         
         # Threshold slider
         self.threshold_label = QLabel("Thresh: 128")
@@ -1169,7 +1187,7 @@ class DitherApp(QMainWindow):
         self.threshold_slider.setRange(1, 254)
         self.threshold_slider.setValue(128)
         self.threshold_slider.valueChanged.connect(self.threshold_changed)
-        self.threshold_slider.setFixedHeight(20)
+        self.threshold_slider.setFixedHeight(15)
         slider_grid.addWidget(self.threshold_slider, 0, 1)
         
         # Contrast slider
@@ -1180,7 +1198,7 @@ class DitherApp(QMainWindow):
         self.contrast_slider.setRange(10, 500)
         self.contrast_slider.setValue(100)
         self.contrast_slider.valueChanged.connect(self.contrast_changed)
-        self.contrast_slider.setFixedHeight(20)
+        self.contrast_slider.setFixedHeight(15)
         slider_grid.addWidget(self.contrast_slider, 1, 1)
         
         # Pixel Scale slider
@@ -1191,7 +1209,7 @@ class DitherApp(QMainWindow):
         self.scale_slider.setRange(1, 8)
         self.scale_slider.setValue(1)
         self.scale_slider.valueChanged.connect(self.scale_changed)
-        self.scale_slider.setFixedHeight(20)
+        self.scale_slider.setFixedHeight(15)
         slider_grid.addWidget(self.scale_slider, 2, 1)
         
         # Zoom slider
@@ -1202,21 +1220,32 @@ class DitherApp(QMainWindow):
         self.zoom_slider.setRange(10, 500)
         self.zoom_slider.setValue(100)
         self.zoom_slider.valueChanged.connect(self.handle_zoom_slider_change)
-        self.zoom_slider.setFixedHeight(20)
+        self.zoom_slider.setFixedHeight(15)
         slider_grid.addWidget(self.zoom_slider, 3, 1)
         
         self.control_layout.addLayout(slider_grid)
         
-        # Apply button at the bottom
+        # Apply button at the bottom with Exit button
+        button_row = QHBoxLayout()
+        button_row.setSpacing(1)
+        button_row.setContentsMargins(0, 0, 0, 0)
+        
+        self.exit_button = QPushButton("Exit")
+        self.exit_button.clicked.connect(self.close)
+        self.exit_button.setFixedHeight(20)
+        button_row.addWidget(self.exit_button)
+        
         self.apply_button = QPushButton("Apply Dither")
         self.apply_button.clicked.connect(self.apply_dither)
-        self.apply_button.setFixedHeight(30)
-        self.control_layout.addWidget(self.apply_button)
+        self.apply_button.setFixedHeight(20)
+        button_row.addWidget(self.apply_button)
+        
+        self.control_layout.addLayout(button_row)
         
         # Add control panel and image panel to main layout
         # Make image panel take 75% of the height
-        main_layout.addWidget(self.image_panel, 75)
-        main_layout.addWidget(self.control_panel, 25)
+        main_layout.addWidget(self.image_panel, 80)
+        main_layout.addWidget(self.control_panel, 20)
         
         # Connect ImageViewer zoom changes to update slider/label
         self.image_viewer.zoom_changed.connect(self.update_controls_from_zoom_factor)
