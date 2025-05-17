@@ -25,11 +25,11 @@ class ButtonConnect:
         """
         # Default button pins if none provided
         self.button_pins = button_pins or {
-            'up': 17,
-            'down': 18,
-            'left': 22,
-            'right': 23,
-            'select': 27
+            'up': 16,
+            'down': 26,
+            'left': 20,
+            'right': 19,
+            'select': 21
         }
         
         # Button state tracking
