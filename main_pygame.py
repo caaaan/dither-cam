@@ -26,11 +26,25 @@ FRAME_PROCESS_TIME = 0           # Time spent processing the last frame
 # Initialize pygame
 pygame.init()
 
-# Set up the display
-WINDOW_WIDTH = 480
-WINDOW_HEIGHT = 320
-screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-pygame.display.set_caption(config.APP_NAME)
+# Set up the display with basic settings
+try:
+    # Try to use a basic display mode first
+    os.environ['SDL_VIDEODRIVER'] = 'x11'  # Force X11 driver
+    WINDOW_WIDTH = 480
+    WINDOW_HEIGHT = 320
+    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.HWSURFACE | pygame.DOUBLEBUF)
+    pygame.display.set_caption(config.APP_NAME)
+except pygame.error as e:
+    print(f"Error initializing display: {e}")
+    print("Trying alternative display mode...")
+    try:
+        # Try with software rendering
+        screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SWSURFACE)
+        pygame.display.set_caption(config.APP_NAME)
+    except pygame.error as e:
+        print(f"Failed to initialize display: {e}")
+        pygame.quit()
+        sys.exit(1)
 
 # Colors
 WHITE = (255, 255, 255)
@@ -41,7 +55,11 @@ GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 
 # Font
-font = pygame.font.SysFont(None, 24)
+try:
+    font = pygame.font.SysFont(None, 24)
+except pygame.error as e:
+    print(f"Error loading font: {e}")
+    font = pygame.font.Font(None, 24)  # Fallback to default font
 
 # Button and Slider definitions
 class Button:
