@@ -8,7 +8,7 @@ GPIO_UP = 16       # Up button GPIO pin
 GPIO_DOWN = 26     # Down button GPIO pin  
 GPIO_LEFT = 20     # Left button GPIO pin
 GPIO_RIGHT = 19    # Right button GPIO pin
-GPIO_SELECT = 21   # Select/Enter button GPIO pin
+GPIO_CAPTURE = 21   # Select/Enter button GPIO pin
 
 # Button press callbacks and state tracking
 button_pressed = {
@@ -16,7 +16,7 @@ button_pressed = {
     'down': False,
     'left': False, 
     'right': False,
-    'select': False
+    'capture': False
 }
 
 last_press_time = {
@@ -24,7 +24,7 @@ last_press_time = {
     'down': 0,
     'left': 0,
     'right': 0,
-    'select': 0
+    'capture': 0
 }
 
 # Global callback functions list
@@ -51,7 +51,7 @@ def init_buttons(pull_up=True, bounce_time=0.05):
         'down': GPIO_DOWN,
         'left': GPIO_LEFT,
         'right': GPIO_RIGHT,
-        'select': GPIO_SELECT
+        'capture': GPIO_CAPTURE
     }
     
     for name, pin in button_pins.items():
