@@ -104,11 +104,18 @@ class DitherApp(QMainWindow):
         self._process_thread: ProcessThread | None = None
         self._source = source  # injected CaptureSource, or None = auto-detect
 
-        # --- FPS tracking ---
+        # --- Stats tracking ---
         self._frame_times: list[float] = []
+        self._frames_received: int = 0
+        self._frames_dropped: int = 0
+        self._last_queue_size: int = 0
+        self._stats_log_interval: int = 10   # log to file every N seconds
+
         self._fps_timer = QTimer(self)
         self._fps_timer.timeout.connect(self._update_fps)
         self._fps_timer.start(1000)
+
+        self._stats_log_counter: int = 0
 
         # --- GPIO ---
         self._gpio = GPIOController(self)
@@ -195,17 +202,54 @@ class DitherApp(QMainWindow):
         if frame is not None:
             self._view.update_frame(frame)
             self._frame_times.append(time.monotonic())
+            self._frames_received += 1
+        else:
+            self._frames_dropped += 1
+        self._last_queue_size = self._frame_queue.qsize()
 
     def _update_fps(self):
         now = time.monotonic()
         self._frame_times = [t for t in self._frame_times if now - t < 2.0]
+
         if len(self._frame_times) >= 2:
             span = self._frame_times[-1] - self._frame_times[0]
-            self._osd.set_fps(
-                (len(self._frame_times) - 1) / span if span > 0 else 0,
-            )
+            fps = (len(self._frame_times) - 1) / span if span > 0 else 0.0
         else:
-            self._osd.set_fps(0)
+            fps = 0.0
+
+        self._osd.set_fps(fps)
+
+        # Log detailed stats every N seconds
+        self._stats_log_counter += 1
+        if self._stats_log_counter >= self._stats_log_interval:
+            self._stats_log_counter = 0
+            self._log_stats(fps)
+
+    def _log_stats(self, fps: float):
+        snap = self.settings.snapshot()
+
+        try:
+            import psutil, os
+            proc = psutil.Process(os.getpid())
+            mem_mb = proc.memory_info().rss / 1024 / 1024
+            cpu = psutil.cpu_percent(interval=None)
+            sys_info = f"  cpu={cpu:.1f}%  mem={mem_mb:.1f}MB"
+        except Exception:
+            sys_info = ""
+
+        log.info(
+            "STATS  fps=%.1f  frames=%d  dropped=%d  queue=%d/%d"
+            "  alg=%s  scale=%d  mode=%s%s",
+            fps,
+            self._frames_received,
+            self._frames_dropped,
+            self._last_queue_size,
+            self._frame_queue.maxsize,
+            snap.algorithm,
+            snap.scale,
+            snap.color_mode,
+            sys_info,
+        )
 
     # -- Settings change (for static images / OSD refresh) ---------------
 
