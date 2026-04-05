@@ -10,25 +10,30 @@ show_help() {
     echo "Launch the dither-cam application in different configurations."
     echo ""
     echo "Options:"
-    echo "  -w, --window      Launch in 480x320 window mode (default)"
-    echo "  -f, --fullscreen  Launch in fullscreen mode"
-    echo "  -r, --resolution  Specify resolution (format: WIDTHxHEIGHT, e.g. 800x600)"
-    echo "  -l, --logs        Tail the log file instead of launching"
-    echo "  -h, --help        Display this help and exit"
+    echo "  -w, --window           Launch in 480x320 window mode (default)"
+    echo "  -f, --fullscreen       Launch in fullscreen mode"
+    echo "  -r, --resolution WxH   Window resolution (e.g. 800x600)"
+    echo "  -s, --source SOURCE    Camera source: auto, picamera, webcam (default: auto)"
+    echo "  -d, --device DEV       Webcam device index or path (default: 0)"
+    echo "  -l, --logs             Tail the log file instead of launching"
+    echo "  -h, --help             Display this help and exit"
     echo ""
     echo "Log file: $LOG_FILE"
     echo ""
     echo "Examples:"
-    echo "  ./launch.sh                   # Launch in default window mode (480x320)"
-    echo "  ./launch.sh -f                # Launch in fullscreen mode"
-    echo "  ./launch.sh -r 800x600        # Launch in custom resolution"
-    echo "  ./launch.sh -f -r 1024x768    # Launch in fullscreen with specified resolution"
-    echo "  ./launch.sh --logs            # Watch the live log output"
+    echo "  ./launch.sh                        # Auto-detect camera, 480x320 window"
+    echo "  ./launch.sh -f                     # Fullscreen"
+    echo "  ./launch.sh --source webcam        # Force USB webcam"
+    echo "  ./launch.sh --source webcam -d 1   # USB webcam on /dev/video1"
+    echo "  ./launch.sh --source picamera      # Force CSI ribbon camera"
+    echo "  ./launch.sh --logs                 # Watch live log output"
 }
 
 # Default values
 FULLSCREEN=false
 RESOLUTION="480x320"
+SOURCE="auto"
+DEVICE="0"
 export DISPLAY=:0
 
 # Parse command line arguments
@@ -37,6 +42,8 @@ while [[ "$#" -gt 0 ]]; do
         -f|--fullscreen) FULLSCREEN=true ;;
         -w|--window) FULLSCREEN=false ;;
         -r|--resolution) RESOLUTION="$2"; shift ;;
+        -s|--source) SOURCE="$2"; shift ;;
+        -d|--device) DEVICE="$2"; shift ;;
         -l|--logs)
             if [ -f "$LOG_FILE" ]; then
                 tail -f "$LOG_FILE"
@@ -52,23 +59,20 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
-# Build command arguments
-ARGS="--resolution $RESOLUTION"
+# Build Python arguments
+ARGS="--resolution $RESOLUTION --source $SOURCE --device $DEVICE"
 if [ "$FULLSCREEN" = true ]; then
     ARGS="$ARGS --fullscreen"
 fi
 
 # Display what we're going to run
-echo "Launching dither-cam  resolution=$RESOLUTION  fullscreen=$FULLSCREEN"
+echo "Launching dither-cam  resolution=$RESOLUTION  fullscreen=$FULLSCREEN  source=$SOURCE"
 echo "Log file: $LOG_FILE"
 
-# Check if virtual environment exists and activate it
-if [ -d "venv" ] && [ -f "venv/bin/activate" ]; then
+# Activate venv if present
+if [ -d "$SCRIPT_DIR/venv" ] && [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
     echo "Activating virtual environment..."
-    source venv/bin/activate
-    # Run the Python script with arguments
-    python3 main.py $ARGS
-else
-    echo "Virtual environment not found. Running with system Python..."
-    python3 main.py $ARGS
-fi 
+    source "$SCRIPT_DIR/venv/bin/activate"
+fi
+
+python3 "$SCRIPT_DIR/main.py" $ARGS

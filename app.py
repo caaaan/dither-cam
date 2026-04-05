@@ -22,10 +22,7 @@ from PyQt6.QtWidgets import QMainWindow, QWidget
 import config
 from settings import SettingsModel
 from pipeline import DisplaySlot
-from camera import (
-    CaptureThread, ProcessThread, CaptureSource,
-    PICAMERA_AVAILABLE, make_source,
-)
+from camera import CaptureThread, ProcessThread, CaptureSource, make_source
 from overlay import OSDOverlay
 from controls import GPIOController
 
@@ -125,10 +122,9 @@ class DitherApp(QMainWindow):
             self.showFullScreen()
 
         # --- Auto-start camera ---
-        if PICAMERA_AVAILABLE:
-            QTimer.singleShot(100, self._start_camera)
-        else:
-            self._osd.set_status("Camera not available (keyboard: arrows + space)")
+        # Always start -- the source was chosen by the caller (picamera / webcam / auto).
+        # WebcamSource works without picamera2 being installed.
+        QTimer.singleShot(100, self._start_camera)
 
     # -- GPIO wiring -----------------------------------------------------
 
