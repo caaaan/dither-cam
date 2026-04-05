@@ -22,7 +22,7 @@ show_help() {
 # Default values
 FULLSCREEN=false
 RESOLUTION="480x320"
-
+export DISPLAY=:0
 # Parse command line arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in

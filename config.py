@@ -14,6 +14,13 @@ CAMERA_SAFE_INIT = False  # Set to False to skip extensive camera initialization
 # Image capture configuration
 DEFAULT_CAPTURE_FORMAT = "png"  # File extension for captured images (png, jpg, jpeg)
 
+# GPIO pin configuration (BCM numbering)
+GPIO_UP = 16
+GPIO_DOWN = 26
+GPIO_LEFT = 20
+GPIO_RIGHT = 19
+GPIO_CAPTURE = 21
+
 pyinstaller_cmd = [      # Base PyInstaller command
     "pyinstaller",
     "--windowed",        # For GUI apps (no console)
