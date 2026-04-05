@@ -22,7 +22,10 @@ from PyQt6.QtWidgets import QMainWindow, QWidget
 import config
 from settings import SettingsModel
 from pipeline import DisplaySlot
-from camera import CaptureThread, ProcessThread, PICAMERA_AVAILABLE
+from camera import (
+    CaptureThread, ProcessThread, CaptureSource,
+    PICAMERA_AVAILABLE, make_source,
+)
 from overlay import OSDOverlay
 from controls import GPIOController
 
@@ -79,6 +82,7 @@ class DitherApp(QMainWindow):
         fullscreen: bool = False,
         width: int = 480,
         height: int = 320,
+        source: CaptureSource | None = None,
     ):
         super().__init__()
         self.setWindowTitle(config.APP_NAME)
@@ -101,6 +105,7 @@ class DitherApp(QMainWindow):
         self._frame_queue: queue.Queue = queue.Queue(maxsize=2)
         self._capture_thread: CaptureThread | None = None
         self._process_thread: ProcessThread | None = None
+        self._source = source  # injected CaptureSource, or None = auto-detect
 
         # --- FPS tracking ---
         self._frame_times: list[float] = []
@@ -162,7 +167,9 @@ class DitherApp(QMainWindow):
         self._view.update()
 
         self._capture_thread = CaptureThread(
-            self._frame_queue, parent=self,
+            self._frame_queue,
+            source=self._source,
+            parent=self,
         )
         self._capture_thread.camera_ready.connect(self._on_camera_ready)
         self._capture_thread.camera_error.connect(self._on_camera_error)

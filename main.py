@@ -125,15 +125,21 @@ def main():
                         help="Launch in fullscreen mode")
     parser.add_argument("--resolution", "-r", default="480x320",
                         help="Window resolution WxH (default: 480x320)")
+    parser.add_argument("--source", "-s", default="auto",
+                        choices=["auto", "picamera", "webcam"],
+                        help="Camera source: auto, picamera (CSI), or webcam (USB)")
+    parser.add_argument("--device", "-d", default=0,
+                        help="Webcam device index or /dev/video* path (default: 0)")
     args = parser.parse_args()
 
-    logging.info("Starting DitherCam  resolution=%s  fullscreen=%s",
-                 args.resolution, args.fullscreen)
+    logging.info("Starting DitherCam  resolution=%s  fullscreen=%s  source=%s",
+                 args.resolution, args.fullscreen, args.source)
 
     threading.Thread(target=_warmup_numba, daemon=True).start()
 
     from PyQt6.QtWidgets import QApplication
     from app import DitherApp
+    from camera import make_source, WebcamSource
 
     qapp = QApplication(sys.argv)
 
@@ -143,7 +149,16 @@ def main():
         logging.warning("Invalid resolution '%s', using 480x320", args.resolution)
         w, h = 480, 320
 
-    window = DitherApp(fullscreen=args.fullscreen, width=w, height=h)
+    if args.source == "webcam":
+        try:
+            device = int(args.device)
+        except (ValueError, TypeError):
+            device = args.device
+        source = WebcamSource(device_index=device)
+    else:
+        source = make_source(prefer=args.source)
+
+    window = DitherApp(fullscreen=args.fullscreen, width=w, height=h, source=source)
     window.show()
     sys.exit(qapp.exec())
 
