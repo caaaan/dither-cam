@@ -138,10 +138,20 @@ def main():
     threading.Thread(target=_warmup_numba, daemon=True).start()
 
     from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QTimer
     from app import DitherApp
     from camera import make_source, WebcamSource
+    import signal
 
     qapp = QApplication(sys.argv)
+
+    # Qt blocks Python's default SIGINT handling. This restores Ctrl+C:
+    # a short-lived timer wakes the event loop periodically so Python can
+    # deliver the signal, and the handler calls quit() for a clean shutdown.
+    signal.signal(signal.SIGINT, lambda *_: qapp.quit())
+    _sigint_timer = QTimer()
+    _sigint_timer.start(200)          # wake the event loop every 200ms
+    _sigint_timer.timeout.connect(lambda: None)
 
     try:
         w, h = map(int, args.resolution.split("x"))
