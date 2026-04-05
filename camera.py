@@ -11,12 +11,15 @@ run on separate CPU cores, overlapping capture latency with processing.
 
 from __future__ import annotations
 
+import logging
 import queue
 import time
 
 import numpy as np
 import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
+
+log = logging.getLogger(__name__)
 
 from settings import SettingsModel
 from pipeline import FrameBuffers, DisplaySlot, process_frame
@@ -54,30 +57,45 @@ class CaptureThread(QThread):
         self._running = True
         camera = None
         try:
+            log.info("Creating Picamera2 instance")
             camera = Picamera2()
+
+            # Cap at 30fps and let AGC/AWB converge before emitting ready.
+            controls = {"FrameDurationLimits": (33333, 33333)}
             config = camera.create_preview_configuration(
                 main={"size": (self._width, self._height), "format": "RGB888"},
+                controls=controls,
+                buffer_count=2,
             )
             camera.configure(config)
+            log.info("Starting camera  size=%dx%d", self._width, self._height)
             camera.start()
-            time.sleep(0.5)
 
-            test = camera.capture_array()
-            if test is None:
-                self.camera_error.emit("Camera test capture returned None")
-                return
-
+            # libcamera needs ~1-2s for AGC/AWB to settle.
+            # We emit camera_ready here so the UI clears "Starting camera..."
+            # immediately; the first few frames may look dark/washed but that
+            # is normal and corrects itself within a second.
+            time.sleep(2.0)
+            log.info("Camera ready, entering capture loop")
             self.camera_ready.emit()
 
             while self._running:
-                frame = camera.capture_array()
-                if frame is None:
+                try:
+                    frame = camera.capture_array()
+                except Exception as exc:
+                    log.error("capture_array failed: %s", exc, exc_info=True)
+                    time.sleep(0.05)
                     continue
 
+                if frame is None or frame.size == 0:
+                    log.debug("Empty frame skipped")
+                    continue
+
+                # Drop alpha channel if camera returns XRGB/RGBA
                 if len(frame.shape) == 3 and frame.shape[2] == 4:
                     frame = frame[:, :, :3]
 
-                # picamera2 with RGB888 already outputs RGB -- no conversion
+                # picamera2 RGB888 is already RGB -- no conversion needed
                 if self._queue.full():
                     try:
                         self._queue.get_nowait()
@@ -89,6 +107,7 @@ class CaptureThread(QThread):
                     pass
 
         except Exception as exc:
+            log.critical("CaptureThread crashed: %s", exc, exc_info=True)
             self.camera_error.emit(str(exc))
         finally:
             if camera is not None:
@@ -97,6 +116,7 @@ class CaptureThread(QThread):
                     camera.close()
                 except Exception:
                     pass
+            log.info("CaptureThread exited")
 
     def stop(self):
         self._running = False

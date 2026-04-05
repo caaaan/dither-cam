@@ -6,10 +6,13 @@ and OSD overlay into a single cohesive application.
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import time
 from datetime import datetime
+
+log = logging.getLogger(__name__)
 
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer
@@ -175,9 +178,12 @@ class DitherApp(QMainWindow):
     def _on_camera_ready(self):
         self._osd.set_status(None)
         self._osd.touch()
+        self._view.update()
 
     def _on_camera_error(self, msg: str):
+        log.error("Camera error: %s", msg)
         self._osd.set_status(f"Camera error: {msg}")
+        self._view.update()
 
     # -- Frame display ---------------------------------------------------
 
@@ -222,9 +228,9 @@ class DitherApp(QMainWindow):
         try:
             import cv2
             cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-            print(f"Saved: {path}")
+            log.info("Captured frame saved: %s", path)
         except Exception as exc:
-            print(f"Save failed: {exc}")
+            log.error("Save failed: %s", exc, exc_info=True)
 
     # -- Keyboard fallback -----------------------------------------------
 

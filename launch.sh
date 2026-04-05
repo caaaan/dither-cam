@@ -2,6 +2,9 @@
 
 # Launch script for dither-cam application
 # DONT FORGET TO RUN "chmod +x launch.sh" TO MAKE THE FILE EXECUTABLE
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="$SCRIPT_DIR/logs/dithercam.log"
+
 show_help() {
     echo "Usage: ./launch.sh [OPTION]"
     echo "Launch the dither-cam application in different configurations."
@@ -10,25 +13,39 @@ show_help() {
     echo "  -w, --window      Launch in 480x320 window mode (default)"
     echo "  -f, --fullscreen  Launch in fullscreen mode"
     echo "  -r, --resolution  Specify resolution (format: WIDTHxHEIGHT, e.g. 800x600)"
+    echo "  -l, --logs        Tail the log file instead of launching"
     echo "  -h, --help        Display this help and exit"
+    echo ""
+    echo "Log file: $LOG_FILE"
     echo ""
     echo "Examples:"
     echo "  ./launch.sh                   # Launch in default window mode (480x320)"
     echo "  ./launch.sh -f                # Launch in fullscreen mode"
     echo "  ./launch.sh -r 800x600        # Launch in custom resolution"
     echo "  ./launch.sh -f -r 1024x768    # Launch in fullscreen with specified resolution"
+    echo "  ./launch.sh --logs            # Watch the live log output"
 }
 
 # Default values
 FULLSCREEN=false
 RESOLUTION="480x320"
 export DISPLAY=:0
+
 # Parse command line arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -f|--fullscreen) FULLSCREEN=true ;;
         -w|--window) FULLSCREEN=false ;;
         -r|--resolution) RESOLUTION="$2"; shift ;;
+        -l|--logs)
+            if [ -f "$LOG_FILE" ]; then
+                tail -f "$LOG_FILE"
+            else
+                echo "No log file yet: $LOG_FILE"
+                echo "Run the app first."
+            fi
+            exit 0
+            ;;
         -h|--help) show_help; exit 0 ;;
         *) echo "Unknown parameter: $1"; show_help; exit 1 ;;
     esac
@@ -42,7 +59,8 @@ if [ "$FULLSCREEN" = true ]; then
 fi
 
 # Display what we're going to run
-echo "Launching dither-cam with resolution: $RESOLUTION, fullscreen: $FULLSCREEN"
+echo "Launching dither-cam  resolution=$RESOLUTION  fullscreen=$FULLSCREEN"
+echo "Log file: $LOG_FILE"
 
 # Check if virtual environment exists and activate it
 if [ -d "venv" ] && [ -f "venv/bin/activate" ]; then
